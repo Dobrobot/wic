@@ -9,6 +9,11 @@ History
   priority
 - changed URL schema to be an enum rather than string
 - added mbed integration
+- added wic_on_handshake_failure_fn callback to indicate a failed
+  hanshake
+- added wic_on_close_transport_fn to simplify the task of ensuring
+  that the transport gets closed
+
 
 ## 0.1.0
 
