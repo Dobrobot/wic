@@ -21,7 +21,6 @@
 
 #include "transport.h"
 #include "log.h"
-#include "wic.h"
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -33,7 +32,7 @@
 #include <errno.h>
 #include <string.h>
 
-bool transport_open_client(const char *schema, const char *host, uint16_t port, int *s)
+bool transport_open_client(enum wic_schema schema, const char *host, uint16_t port, int *s)
 {
     char pbuf[20];
     struct addrinfo *res;
@@ -45,13 +44,15 @@ bool transport_open_client(const char *schema, const char *host, uint16_t port, 
 
     (void)memset(pbuf, 0, sizeof(pbuf));
 
-    if(
-        (strcmp("https", schema) == 0)
-        ||
-        (strcmp("wss", schema) == 0)
-    ){
+    switch(schema){
+    case WIC_SCHEMA_HTTPS:
+    case WIC_SCHEMA_WSS:
+
         ERROR("not supporting https or wss schemas at the moment")
         return false;
+
+    default:
+        break;
     }
 
     if(port != 0){

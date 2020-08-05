@@ -31,6 +31,7 @@ struct wic_tx_frame {
     bool rsv3;
 
     enum wic_opcode opcode;
+    enum wic_frame_type type;
 
     uint16_t code;
 
@@ -70,6 +71,11 @@ static const enum wic_opcode opcodes[] = {
 
 /* static prototypes **************************************************/
 
+static size_t min_frame_size(enum wic_opcode opcode, bool masked, uint16_t payload_size);
+
+static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size, enum wic_frame_type type);
+static void close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size, enum wic_frame_type type);
+
 static bool allowed_to_send(struct wic_inst *self);
 
 static void parse_websocket(struct wic_inst *self, struct wic_stream *s);
@@ -77,7 +83,6 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s);
 static bool start_client(struct wic_inst *self);
 static bool start_server(struct wic_inst *self);
 
-static void close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size);
 static struct wic_tx_frame *init_mask(struct wic_inst *self, struct wic_tx_frame *f);
 static uint8_t opcode_to_byte(enum wic_opcode opcode);
 static enum wic_opcode byte_to_opcode(uint8_t b);
@@ -87,7 +92,7 @@ static void stream_init_ro(struct wic_stream *self, const void *buf, uint32_t si
 static void stream_rewind(struct wic_stream *self);
 static bool stream_read(struct wic_stream *self, void *buf, size_t count);
 static bool stream_write(struct wic_stream *self, const void *buf, size_t count);
-static bool stream_put_frame(struct wic_inst *self, const struct wic_tx_frame *f);
+static bool stream_put_frame(struct wic_inst *self, struct wic_stream *tx, const struct wic_tx_frame *f);
 static bool stream_put_u8(struct wic_stream *self, uint8_t value);
 static bool stream_put_u8_masked(struct wic_stream *self, uint8_t value, const uint8_t *mask, uint8_t *unmasked);
 static bool stream_put_u16(struct wic_stream *self, uint16_t value);
@@ -134,18 +139,31 @@ bool wic_init(struct wic_inst *self, const struct wic_init_arg *arg)
 
     static const char *supported_schema[] = {
         "http",
-        "https",
-        "wss",
-        "ws"
+        "https",        
+        "ws",
+        "wss"
     };
 
-    const char *schema = NULL;
+    static const enum wic_schema schema_map[] = {
+        WIC_SCHEMA_HTTP,
+        WIC_SCHEMA_HTTPS,
+        WIC_SCHEMA_WS,
+        WIC_SCHEMA_WSS
+    };
+
+    enum wic_schema schema = WIC_SCHEMA_WS;
 
     (void)memset(self, 0, sizeof(*self));
 
-    if(arg->write == NULL){
+    if(arg->on_send == NULL){
 
-        WIC_ERROR("write interface is mandatory")
+        WIC_ERROR("on_send interface is mandatory")
+        return false;
+    }
+
+    if(arg->on_buffer == NULL){
+
+        WIC_ERROR("on_buffer interface is mandatory")
         return false;
     }
 
@@ -167,13 +185,13 @@ bool wic_init(struct wic_inst *self, const struct wic_init_arg *arg)
 
                     if(memcmp(&arg->url[u.field_data[UF_SCHEMA].off], supported_schema[i], u.field_data[UF_SCHEMA].len) == 0){
 
-                        schema = supported_schema[i];                        
+                        schema = schema_map[i];
                         break;
                     }
                 }
             }
 
-            if(schema == NULL){
+            if(i == (sizeof(supported_schema)/sizeof(*supported_schema))){
 
                 WIC_ERROR("unrecognised URL schema")
                 return false;
@@ -201,8 +219,7 @@ bool wic_init(struct wic_inst *self, const struct wic_init_arg *arg)
     }
 
     stream_init(&self->rx.s, arg->rx, arg->rx_max);
-    stream_init(&self->tx, arg->tx, arg->tx_max);
-
+    
     self->url = arg->url;
     self->schema = schema;
     self->app = arg->app;
@@ -214,9 +231,12 @@ bool wic_init(struct wic_inst *self, const struct wic_init_arg *arg)
     self->on_open = arg->on_open;    
     self->on_close = arg->on_close;    
 
-    self->write = arg->write;    
+    self->on_send = arg->on_send;
+    self->on_buffer = arg->on_buffer;
     self->rand = arg->rand;
-
+    self->on_close_transport = arg->on_close_transport;
+    self->on_handshake_failure = arg->on_handshake_failure;
+    
     if(self->role == WIC_ROLE_CLIENT){
 
         http_parser_init(&self->http, HTTP_RESPONSE);
@@ -252,7 +272,7 @@ uint16_t wic_get_url_port(const struct wic_inst *self)
     return self->port;
 }
 
-const char *wic_get_url_schema(const struct wic_inst *self)
+enum wic_schema wic_get_url_schema(const struct wic_inst *self)
 {
     return self->schema;
 }
@@ -276,6 +296,12 @@ bool wic_start(struct wic_inst *self)
         break;
     }
 
+    /* once start is called, WIC will close the transport if required */
+    if(!retval && (self->on_close_transport != NULL)){
+
+        self->on_close_transport(self);
+    }
+
     return retval;
 }
 
@@ -286,12 +312,13 @@ void wic_close(struct wic_inst *self)
 
 void wic_close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size)
 {
-    close_with_reason(self, code, reason, size);    
+    close_with_reason(self, code, reason, size, WIC_FRAME_TYPE_CLOSE);
 }
 
 bool wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size)
 {
     bool retval = false;
+    struct wic_stream tx;
 
     struct wic_tx_frame f = {
         .fin = fin,
@@ -300,7 +327,8 @@ bool wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t
         .rsv3 = false,
         .opcode = WIC_OPCODE_BINARY,
         .size = size,
-        .payload = data
+        .payload = data,
+        .type = WIC_FRAME_TYPE_USER
     };
 
     if(allowed_to_send(self)){
@@ -311,16 +339,16 @@ bool wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t
 
             f.opcode = (self->frag == WIC_OPCODE_BINARY) ? WIC_OPCODE_CONTINUE : f.opcode;
 
-            if(stream_put_frame(self, init_mask(self, &f))){
+            if(stream_put_frame(self, &tx, init_mask(self, &f))){
 
                 self->frag = fin ? WIC_OPCODE_CONTINUE : WIC_OPCODE_BINARY;
-                self->write(self, self->tx.read, self->tx.pos);            
-                retval = true;
-            }
-            else{
+                
+                self->on_send(self, tx.read, tx.pos, WIC_FRAME_TYPE_USER);
 
-                WIC_ERROR("tx buffer too short")
-            }
+                self->state = WIC_STATE_OPEN;
+                
+                retval = true;                
+            }            
             break;
 
         default:
@@ -341,7 +369,8 @@ bool wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t s
 {
     bool retval = false;
     uint16_t state;
-
+    struct wic_stream tx;
+    
     struct wic_tx_frame f = {
         .fin = fin,
         .rsv1 = false,
@@ -349,7 +378,8 @@ bool wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t s
         .rsv3 = false,
         .opcode = WIC_OPCODE_TEXT,
         .size = size,
-        .payload = data
+        .payload = data,
+        .type = WIC_FRAME_TYPE_USER
     };
     
     if(allowed_to_send(self)){
@@ -368,17 +398,15 @@ bool wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t s
             }            
             else if(!fin || utf8_is_complete(state)){
 
-                if(stream_put_frame(self, init_mask(self, &f))){
-
+                if(stream_put_frame(self, &tx, init_mask(self, &f))){
+    
                     self->utf8_tx = state;
                     self->frag = fin ? WIC_OPCODE_CONTINUE : WIC_OPCODE_TEXT;
-                    self->write(self, self->tx.read, self->tx.pos);            
+                    self->state = WIC_STATE_OPEN;
+                    
+                    self->on_send(self, tx.read, tx.pos, WIC_FRAME_TYPE_USER);            
                     retval = true;
-                }
-                else{
-
-                    WIC_ERROR("tx buffer too short")
-                }
+                }                
             }
             else{
 
@@ -408,6 +436,7 @@ bool wic_send_ping(struct wic_inst *self)
 bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_t size)
 {   
     bool retval = false;
+    struct wic_stream tx;
 
     struct wic_tx_frame f = {
         .fin = true,
@@ -416,20 +445,19 @@ bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_
         .rsv3 = false,
         .opcode = WIC_OPCODE_PING,
         .size = size,
-        .payload = data
+        .payload = data,
+        .type = WIC_FRAME_TYPE_PING
     };
 
     if(allowed_to_send(self)){
 
-        if(stream_put_frame(self, init_mask(self, &f))){
+        if(stream_put_frame(self, &tx, init_mask(self, &f))){
 
-            self->write(self, self->tx.read, self->tx.pos);
+            self->state = WIC_STATE_OPEN;
+
+            self->on_send(self, tx.read, tx.pos, WIC_FRAME_TYPE_PING);
             retval = true;
-        }
-        else{
-
-            WIC_ERROR("tx buffer too short")
-        }
+        }        
     }
     else{
 
@@ -441,41 +469,12 @@ bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_
 
 bool wic_send_pong(struct wic_inst *self)
 {
-    return wic_send_pong_with_payload(self, NULL, 0U);    
+    return send_pong_with_payload(self, NULL, 0U, WIC_FRAME_TYPE_PONG);
 }
 
 bool wic_send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size)
 {
-    bool retval = false;
-
-    struct wic_tx_frame f = {
-        .fin = true,
-        .rsv1 = false,
-        .rsv2 = false,
-        .rsv3 = false,
-        .opcode = WIC_OPCODE_PONG,
-        .size = size,
-        .payload = data
-    };
-
-    if(allowed_to_send(self)){
-
-        if(stream_put_frame(self, init_mask(self, &f))){
-
-            self->write(self, self->tx.read, self->tx.pos);
-            retval = true;
-        }
-        else{
-
-            WIC_ERROR("tx buffer too short")
-        }        
-    }
-    else{
-
-        WIC_DEBUG("websocket is not open")
-    }
-
-    return retval;
+    return send_pong_with_payload(self, data, size, WIC_FRAME_TYPE_PONG);
 }
 
 void wic_parse(struct wic_inst *self, const void *data, size_t size)
@@ -509,9 +508,9 @@ void wic_parse(struct wic_inst *self, const void *data, size_t size)
 
             self->state = WIC_STATE_CLOSED;
 
-            if(self->on_close != NULL){
+            if(self->on_close_transport != NULL){
 
-                self->on_close(self, WIC_CLOSE_PROTOCOL_ERROR, http_errno_description(self->http.http_errno), strlen(http_errno_description(self->http.http_errno)));
+                self->on_close_transport(self);
             }
         }
         else{
@@ -633,14 +632,158 @@ enum wic_state wic_get_state(const struct wic_inst *self)
 
 /* static functions ***************************************************/
 
-static bool allowed_to_send(struct wic_inst *self)
+static size_t min_frame_size(enum wic_opcode opcode, bool masked, uint16_t payload_size)
 {
-    if((self->role == WIC_ROLE_CLIENT) && (self->state == WIC_STATE_READY)){
+    size_t retval = payload_size;
 
-        self->state = WIC_STATE_OPEN;
+    if(opcode == WIC_OPCODE_CLOSE){
+
+        /* close includes 2 byte code */
+        retval += 2U;
     }
 
-    return self->state == WIC_STATE_OPEN;
+    if(retval > 125U){
+
+        /* size encoding up to 65535 bytes */
+        retval += 2UL;
+    }
+
+    /* header */
+    retval += 2UL;
+
+    if(masked){
+
+        retval += 4UL;
+    }
+    
+    return retval;
+}
+
+static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size, enum wic_frame_type type)
+{
+    bool retval = false;
+    struct wic_stream tx;
+    
+    struct wic_tx_frame f = {
+        .fin = true,
+        .rsv1 = false,
+        .rsv2 = false,
+        .rsv3 = false,
+        .opcode = WIC_OPCODE_PONG,
+        .size = size,
+        .payload = data,
+        .type = type
+    };
+
+    if(allowed_to_send(self)){
+
+        if(stream_put_frame(self, &tx, init_mask(self, &f))){
+
+            self->state = WIC_STATE_OPEN;
+
+            self->on_send(self, tx.read, tx.pos, type);
+            retval = true;
+        }        
+    }
+    else{
+
+        WIC_DEBUG("websocket is not open")
+    }
+
+    return retval;
+}
+
+static void close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size, enum wic_frame_type type)
+{
+    struct wic_stream tx;
+    
+    struct wic_tx_frame f = {
+        .fin = true,
+        .rsv1 = false,
+        .rsv2 = false,
+        .rsv3 = false,
+        .opcode = WIC_OPCODE_CLOSE,
+        .payload = reason,
+        .code = code,
+        .size = size,
+        .type = type
+    };
+
+    switch(self->state){
+    case WIC_STATE_INIT:
+        self->state = WIC_STATE_CLOSED;
+        break;
+    case WIC_STATE_CLOSED:
+        break;
+    case WIC_STATE_PARSE_HANDSHAKE:
+
+        self->state = WIC_STATE_CLOSED;
+
+        if(self->on_close_transport != NULL){
+
+            self->on_close_transport(self);
+        }        
+
+        if(self->on_handshake_failure != NULL){
+
+            switch(code){
+            case WIC_CLOSE_ABNORMAL_1:
+                self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_ABNORMAL_1);
+                break;
+            case WIC_CLOSE_ABNORMAL_2:
+                self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_ABNORMAL_2);
+                break;
+            case WIC_CLOSE_TLS:
+                self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_TLS);
+                break;
+            default:
+                self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_IRRELEVANT);
+                break;            
+            }
+        }
+        break;
+        
+    case WIC_STATE_OPEN:
+    case WIC_STATE_READY:
+    
+        self->state = WIC_STATE_CLOSED;
+
+        if(!utf8_is_complete(utf8_parse_string(0U, reason, size))){
+
+            WIC_ERROR("reason string must be UTF8 (discarding)")
+            f.size = 0U;
+            f.payload = NULL;
+        }
+
+        switch(code){
+        /* these are not written */
+        case WIC_CLOSE_ABNORMAL_1:
+        case WIC_CLOSE_ABNORMAL_2:
+        case WIC_CLOSE_TLS:
+            break;
+        default:
+            if(stream_put_frame(self, &tx, init_mask(self, &f))){
+                
+                self->on_send(self, tx.read, tx.pos, type);
+            }
+            break;
+        }
+         
+        if(self->on_close_transport != NULL){
+
+            self->on_close_transport(self);
+        }
+        
+        if(self->on_close != NULL){
+
+            self->on_close(self, code, reason, size);
+        }        
+    }    
+}
+
+static bool allowed_to_send(struct wic_inst *self)
+{
+    return (self->state == WIC_STATE_OPEN) || ((self->role == WIC_ROLE_CLIENT) && (self->state == WIC_STATE_READY));
 }
 
 static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
@@ -665,7 +808,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
             /* no extensions atm so these must be 0 */
             if(self->rx.rsv1 || self->rx.rsv2 || self->rx.rsv3){
 
-                close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
             }
             else{
 
@@ -680,7 +823,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
                     /* close, ping, and pong must be final */
                     if(!self->rx.fin){
                         
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     }
                     break;
 
@@ -689,7 +832,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
                     /* continue must follow a non-final text/binary */
                     if(self->rx.frag == WIC_OPCODE_CONTINUE){
 
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     }
                     else{
 
@@ -703,12 +846,12 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
                     /* interrupting fragmentation */
                     if(self->rx.frag != WIC_OPCODE_CONTINUE){
 
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     }
                     break;
                     
                 default:
-                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     break;
                 }
 
@@ -729,17 +872,17 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                 if((self->rx.size > 125U) || (self->rx.size == 1U)){
 
-                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                 }
                 else{
 
                     if(self->rx.size == 0U){
 
-                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     }
                     else if(self->rx.size > stream_max(&self->rx.s)){
 
-                        close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                     }
                     else{
 
@@ -753,11 +896,11 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
             
                 if(self->rx.size > 125U){
                     
-                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                 }
                 else if(self->rx.size > stream_max(&self->rx.s)){
 
-                    close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U);
+                    close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                 }
                 else{
 
@@ -903,7 +1046,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                         if(utf8_is_invalid(self->rx.utf8)){
 
-                            close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U);
+                            close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                         }
                         break;
 
@@ -915,7 +1058,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                             if(utf8_is_invalid(self->rx.utf8)){
 
-                                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U);
+                                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
                             }
                         }
                         break;
@@ -947,7 +1090,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
                 }
                 else{
 
-                    close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U);
+                    close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_FRAME_TYPE_CLOSE);
                 }
                 break;
 
@@ -976,11 +1119,11 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                     if(utf8_is_complete(self->rx.utf8)){
 
-                        close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code));
+                        close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code), WIC_FRAME_TYPE_RESPONSE_CLOSE);
                     }
                     else{
 
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
                     }
                     break;
 
@@ -988,15 +1131,15 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                     if((code >= 3000U) && (code <= 3999)){
 
-                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
                     }
                     else if((code >= 4000U) && (code <= 4999)){
 
-                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
                     }
                     else{
                         
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
                     }
                     break;
                 }
@@ -1005,7 +1148,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
             case WIC_OPCODE_PING:
 
-                wic_send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos);
+                send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos, WIC_FRAME_TYPE_RESPONSE_PONG);
                 break;
             
             case WIC_OPCODE_PONG:
@@ -1024,44 +1167,59 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
 static bool start_server(struct wic_inst *self)
 {
+    void *buf;
+    size_t max;
+    struct wic_stream tx;
     bool retval = false;
     char b64_hash[28U];
 
     if(self->state == WIC_STATE_READY){
 
-        stream_rewind(&self->tx);
+        buf = self->on_buffer(self, 0U, WIC_FRAME_TYPE_HTTP, &max);
 
-        stream_put_str(&self->tx, "HTTP/1.1 101 Switching Protocols\r\n");
+        if(buf != NULL){
 
-        stream_put_str(&self->tx, "Upgrade: websocket\r\n");
-        stream_put_str(&self->tx, "Connection: upgrade\r\n");
+            stream_init(&tx, buf, max);
 
-        stream_put_str(&self->tx, "Sec-WebSocket-Accept: ");
+            stream_put_str(&tx, "HTTP/1.1 101 Switching Protocols\r\n");
 
-        b64_encode(self->hash, sizeof(self->hash), b64_hash, sizeof(b64_hash));
-        stream_write(&self->tx, b64_hash, sizeof(b64_hash));
-        stream_put_str(&self->tx, "\r\n");
+            stream_put_str(&tx, "Upgrade: websocket\r\n");
+            stream_put_str(&tx, "Connection: upgrade\r\n");
 
-        for(struct wic_header *ptr = self->tx_header; ptr != NULL; ptr = ptr->next){
+            stream_put_str(&tx, "Sec-WebSocket-Accept: ");
 
-            stream_put_str(&self->tx, ptr->name);
-            stream_put_str(&self->tx, ": ");
-            stream_put_str(&self->tx, ptr->value);
-            stream_put_str(&self->tx, "\r\n");
-        }
-        
-        stream_put_str(&self->tx, "\r\n");
+            b64_encode(self->hash, sizeof(self->hash), b64_hash, sizeof(b64_hash));
+            stream_write(&tx, b64_hash, sizeof(b64_hash));
+            stream_put_str(&tx, "\r\n");
 
-        if(!stream_error(&self->tx)){
+            for(struct wic_header *ptr = self->tx_header; ptr != NULL; ptr = ptr->next){
 
-            self->state = WIC_STATE_OPEN;
-            self->write(self, self->tx.read, self->tx.pos);
-            retval = true;           
+                stream_put_str(&tx, ptr->name);
+                stream_put_str(&tx, ": ");
+                stream_put_str(&tx, ptr->value);
+                stream_put_str(&tx, "\r\n");
+            }
+            
+            stream_put_str(&tx, "\r\n");
+
+            if(!stream_error(&tx)){
+
+                self->state = WIC_STATE_OPEN;
+                self->on_send(self, tx.read, tx.pos, WIC_FRAME_TYPE_HTTP);
+                retval = true;           
+            }
+            else{
+
+                /* send with length zero to free */
+                self->on_send(self, tx.read, 0U, WIC_FRAME_TYPE_HTTP);
+                WIC_DEBUG("tx buffer too short")
+            }
         }
         else{
 
-            WIC_DEBUG("tx buffer too short")
+            WIC_DEBUG("buffer not available")
         }
+        
     }
     else{
 
@@ -1073,6 +1231,9 @@ static bool start_server(struct wic_inst *self)
 
 static bool start_client(struct wic_inst *self)
 {
+    void *buf;
+    size_t max;
+    struct wic_stream tx;
     struct http_parser_url u;
     bool retval = false;
     uint32_t nonce[4U];
@@ -1084,74 +1245,86 @@ static bool start_client(struct wic_inst *self)
 
         http_parser_url_init(&u);
 
-        stream_rewind(&self->tx);
-
         if(http_parser_parse_url(self->url, strlen(self->url), 0, &u) == 0){
+
+            buf = self->on_buffer(self, 0U, WIC_FRAME_TYPE_HTTP, &max);
+
+            if(buf != NULL){
+
+                stream_init(&tx, buf, max);
     
-            stream_put_str(&self->tx, "GET ");
-            stream_write(&self->tx, &self->url[u.field_data[UF_PATH].off], u.field_data[UF_PATH].len);
-            if(u.field_data[UF_QUERY].len > 0){
-                stream_put_str(&self->tx, "?");
-                stream_write(&self->tx, &self->url[u.field_data[UF_QUERY].off], u.field_data[UF_QUERY].len);
-            }
-            if(u.field_data[UF_FRAGMENT].len > 0){
-                stream_put_str(&self->tx, "#");
-                stream_write(&self->tx, &self->url[u.field_data[UF_FRAGMENT].off], u.field_data[UF_FRAGMENT].len);
-            }
-            stream_put_str(&self->tx, " HTTP/1.1\r\n");
+                stream_put_str(&tx, "GET ");
+                stream_write(&tx, &self->url[u.field_data[UF_PATH].off], u.field_data[UF_PATH].len);
+                if(u.field_data[UF_QUERY].len > 0){
+                    stream_put_str(&tx, "?");
+                    stream_write(&tx, &self->url[u.field_data[UF_QUERY].off], u.field_data[UF_QUERY].len);
+                }
+                if(u.field_data[UF_FRAGMENT].len > 0){
+                    stream_put_str(&tx, "#");
+                    stream_write(&tx, &self->url[u.field_data[UF_FRAGMENT].off], u.field_data[UF_FRAGMENT].len);
+                }
+                stream_put_str(&tx, " HTTP/1.1\r\n");
 
-            stream_put_str(&self->tx, "Host: ");
-            stream_write(&self->tx, &self->url[u.field_data[UF_HOST].off], u.field_data[UF_HOST].len);
-            if(u.port != 0U){
+                stream_put_str(&tx, "Host: ");
+                stream_write(&tx, &self->url[u.field_data[UF_HOST].off], u.field_data[UF_HOST].len);
+                if(u.port != 0U){
 
-                stream_put_str(&self->tx, ":");
-                stream_write(&self->tx, &self->url[u.field_data[UF_PORT].off], u.field_data[UF_PORT].len);
-            }
-            stream_put_str(&self->tx, "\r\n");
+                    stream_put_str(&tx, ":");
+                    stream_write(&tx, &self->url[u.field_data[UF_PORT].off], u.field_data[UF_PORT].len);
+                }
+                stream_put_str(&tx, "\r\n");
 
-            stream_put_str(&self->tx, "Upgrade: websocket\r\n");
-            stream_put_str(&self->tx, "Connection: upgrade\r\n");
-            stream_put_str(&self->tx, "Sec-WebSocket-Version: 13\r\n");
+                stream_put_str(&tx, "Upgrade: websocket\r\n");
+                stream_put_str(&tx, "Connection: upgrade\r\n");
+                stream_put_str(&tx, "Sec-WebSocket-Version: 13\r\n");
 
-            if(self->rand != NULL){
+                if(self->rand != NULL){
 
-                nonce[0] = self->rand(self);
-                nonce[1] = self->rand(self);
-                nonce[2] = self->rand(self);
-                nonce[3] = self->rand(self);
+                    nonce[0] = self->rand(self);
+                    nonce[1] = self->rand(self);
+                    nonce[2] = self->rand(self);
+                    nonce[3] = self->rand(self);
+                }
+                else{
+
+                    (void)memset(nonce, 0xaa, sizeof(nonce));
+                }
+
+                (void)b64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64));
+                
+                server_hash(nonce_b64, sizeof(nonce_b64), self->hash);
+
+                stream_put_str(&tx, "Sec-WebSocket-Key: ");
+                stream_write(&tx, nonce_b64, sizeof(nonce_b64));            
+                stream_put_str(&tx, "\r\n");
+
+                for(struct wic_header *ptr = self->tx_header; ptr != NULL; ptr = ptr->next){
+
+                    stream_put_str(&tx, ptr->name);
+                    stream_put_str(&tx, ": ");
+                    stream_put_str(&tx, ptr->value);
+                    stream_put_str(&tx, "\r\n");
+                }
+
+                stream_put_str(&tx, "\r\n");
+
+                if(!stream_error(&tx)){
+
+                    self->state = WIC_STATE_PARSE_HANDSHAKE;
+                    self->on_send(self, tx.read, tx.pos, WIC_FRAME_TYPE_HTTP);
+
+                    retval = true;  
+                }
+                else{
+
+                    /* send with length zero to free */
+                    self->on_send(self, tx.read, 0U, WIC_FRAME_TYPE_HTTP);
+                    WIC_DEBUG("tx buffer too short")                    
+                }
             }
             else{
 
-                (void)memset(nonce, 0xaa, sizeof(nonce));
-            }
-
-            (void)b64_encode(nonce, sizeof(nonce), nonce_b64, sizeof(nonce_b64));
-            
-            server_hash(nonce_b64, sizeof(nonce_b64), self->hash);
-
-            stream_put_str(&self->tx, "Sec-WebSocket-Key: ");
-            stream_write(&self->tx, nonce_b64, sizeof(nonce_b64));            
-            stream_put_str(&self->tx, "\r\n");
-
-            for(struct wic_header *ptr = self->tx_header; ptr != NULL; ptr = ptr->next){
-
-                stream_put_str(&self->tx, ptr->name);
-                stream_put_str(&self->tx, ": ");
-                stream_put_str(&self->tx, ptr->value);
-                stream_put_str(&self->tx, "\r\n");
-            }
-
-            stream_put_str(&self->tx, "\r\n");
-
-            if(!stream_error(&self->tx)){
-
-                self->state = WIC_STATE_PARSE_HANDSHAKE;
-                self->write(self, self->tx.read, self->tx.pos);
-                retval = true;  
-            }
-            else{
-
-                WIC_DEBUG("tx buffer too short")
+                WIC_DEBUG("buffer not available")
             }
         }            
     }
@@ -1161,46 +1334,6 @@ static bool start_client(struct wic_inst *self)
     }
 
     return retval;
-}
-
-static void close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size)
-{
-    if(allowed_to_send(self)){
-
-        struct wic_tx_frame f = {
-            .fin = true,
-            .rsv1 = false,
-            .rsv2 = false,
-            .rsv3 = false,
-            .opcode = WIC_OPCODE_CLOSE,
-            .payload = reason,
-            .code = code,
-            .size = size
-        };
-
-        self->state = WIC_STATE_CLOSED;
-
-        if(!utf8_is_complete(utf8_parse_string(0U, reason, size))){
-
-            WIC_ERROR("reason string must be UTF8 (discarding)")
-            f.size = 0U;
-            f.payload = NULL;
-        }
-
-        if(stream_put_frame(self, init_mask(self, &f))){
-
-            self->write(self, self->tx.read, self->tx.pos);
-        }
-        else{
-
-            WIC_ERROR("tx buffer too short")
-        }
-
-        if(self->on_close != NULL){
-
-            self->on_close(self, code, reason, size);
-        }
-    }
 }
 
 static struct wic_tx_frame *init_mask(struct wic_inst *self, struct wic_tx_frame *f)
@@ -1299,66 +1432,84 @@ static bool stream_write(struct wic_stream *self, const void *buf, size_t count)
     return retval;
 }
 
-static bool stream_put_frame(struct wic_inst *self, const struct wic_tx_frame *f)
+static bool stream_put_frame(struct wic_inst *self, struct wic_stream *tx, const struct wic_tx_frame *f)
 {
-    uint32_t size = f->size + ((f->opcode == WIC_OPCODE_CLOSE) ? 2U : 0U);
+    bool retval = false;
+    void *buf;
+    size_t payload_size;
+    size_t frame_size;
+    size_t max;
+    
+    payload_size = f->size + ((f->opcode == WIC_OPCODE_CLOSE) ? 2U : 0U);
+    frame_size = min_frame_size(f->opcode, f->masked, f->size);
 
-    stream_rewind(&self->tx);
+    buf = self->on_buffer(self, frame_size, f->type, &max);
 
-    stream_put_u8(&self->tx, (f->fin ? 0x80U : 0U )
-        | (f->rsv1 ? 0x40U : 0U )
-        | (f->rsv2 ? 0x20U : 0U )
-        | (f->rsv3 ? 0x10U : 0U )
-        | opcode_to_byte(f->opcode)
-    );
+    if(buf != NULL){
 
-    if(size <= 125U){
+        stream_init(tx, buf, frame_size);
+        
+        stream_put_u8(tx, (f->fin ? 0x80U : 0U )
+            | (f->rsv1 ? 0x40U : 0U )
+            | (f->rsv2 ? 0x20U : 0U )
+            | (f->rsv3 ? 0x10U : 0U )
+            | opcode_to_byte(f->opcode)
+        );
 
-        stream_put_u8(&self->tx, (f->masked ? 0x80U : 0U) | size);
-    }
-    else{
+        if(payload_size <= 125U){
 
-        stream_put_u8(&self->tx, (f->masked ? 0x80U : 0U) | 126U);
-        stream_put_u16(&self->tx, size);        
-    }
-
-    if(f->masked){
-
-        stream_write(&self->tx, f->mask, sizeof(f->mask));
-
-        size_t pos;
-        const uint8_t *ptr = f->payload;
-
-        if(f->opcode == WIC_OPCODE_CLOSE){
-
-            stream_put_u8(&self->tx, (f->code >> 8) ^ f->mask[0]);                
-            stream_put_u8(&self->tx, f->code ^ f->mask[1]);
-
-            for(pos=0U; pos < f->size; pos++){
-
-                stream_put_u8(&self->tx, ptr[pos] ^ f->mask[(pos+2U) % 4]);                
-            }        
+            stream_put_u8(tx, (f->masked ? 0x80U : 0U) | payload_size);
         }
         else{
 
-            for(pos=0U; pos < size; pos++){
-
-                stream_put_u8(&self->tx, ptr[pos] ^ f->mask[pos % 4]);                
-            }        
+            stream_put_u8(tx, (f->masked ? 0x80U : 0U) | 126U);
+            stream_put_u16(tx, payload_size);        
         }
-    }    
+
+        if(f->masked){
+
+            stream_write(tx, f->mask, sizeof(f->mask));
+
+            size_t pos;
+            const uint8_t *ptr = f->payload;
+
+            if(f->opcode == WIC_OPCODE_CLOSE){
+
+                stream_put_u8(tx, (f->code >> 8) ^ f->mask[0]);                
+                stream_put_u8(tx, f->code ^ f->mask[1]);
+
+                for(pos=0U; pos < f->size; pos++){
+
+                    stream_put_u8(tx, ptr[pos] ^ f->mask[(pos+2U) % 4]);                
+                }        
+            }
+            else{
+
+                for(pos=0U; pos < payload_size; pos++){
+
+                    stream_put_u8(tx, ptr[pos] ^ f->mask[pos % 4]);                
+                }        
+            }
+        }    
+        else{
+
+            if(f->opcode == WIC_OPCODE_CLOSE){
+
+                stream_put_u8(tx, f->code >> 8);                
+                stream_put_u8(tx, f->code);
+            }
+            
+            stream_write(tx, f->payload, payload_size);        
+        }
+
+        retval = !stream_error(tx);
+    }
     else{
 
-        if(f->opcode == WIC_OPCODE_CLOSE){
-
-            stream_put_u8(&self->tx, f->code >> 8);                
-            stream_put_u8(&self->tx, f->code);
-        }
-        
-        stream_write(&self->tx, f->payload, f->size);        
+        WIC_ERROR("no buffer available for requested size and frame type")
     }
 
-    return !stream_error(&self->tx);
+    return retval;
 }
 
 static size_t stream_len(const struct wic_stream *self)
@@ -1673,13 +1824,15 @@ static int on_response_complete(http_parser *http)
                 self->redirect_url = header;
             }
 
-            wic_close_with_reason(self, WIC_CLOSE_TRANSPORT_ERROR, NULL, 0U);
+            //handshake failure
+            //wic_close_with_reason(self, WIC_CLOSE_TRANSPORT_ERROR, NULL, 0U);
             return -1;
             break;
 
         default:
 
             WIC_DEBUG("unexpected status code '%d'", http->status_code)
+            //handshake failrue
             return -1;
         }        
     }

@@ -32,9 +32,11 @@ static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, u
 static void on_text(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
 static void on_binary(struct wic_inst *inst, bool fin, const void *data, uint16_t size);
 static void on_open(struct wic_inst *inst);
-static void do_write(struct wic_inst *inst, const void *data, size_t size);
+static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type);
 static uint32_t do_random(struct wic_inst *inst);
 static void on_text_case_count(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
+static void on_close_transport(struct wic_inst *inst);
+static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size);
 
 static int n = 0;
 
@@ -65,7 +67,6 @@ static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *
 int main(int argc, char **argv)
 {
     static struct wic_inst inst;
-    static uint8_t tx_buffer[UINT16_MAX+100UL];
     static uint8_t rx_buffer[UINT16_MAX];
     static char url[1000U];
     
@@ -79,11 +80,11 @@ int main(int argc, char **argv)
 
     arg.rx = rx_buffer;
     arg.rx_max = sizeof(rx_buffer);
-    arg.tx = tx_buffer;
-    arg.tx_max = sizeof(tx_buffer);
     arg.on_open = on_open;    
     arg.on_close = on_close;
-    arg.write = do_write;
+    arg.on_send = on_send;
+    arg.on_buffer = on_buffer;
+    arg.on_close_transport = on_close_transport;
     arg.rand = do_random;
     arg.app = &s;
     arg.role = WIC_ROLE_CLIENT;
@@ -147,17 +148,31 @@ static void on_open(struct wic_inst *inst)
 {
 }
 
-static void do_write(struct wic_inst *inst, const void *data, size_t size)
+static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type)
 {
     if(!transport_write(*(int *)wic_get_app(inst), data, size)){
 
         ERROR("transport_write()")
 
-        wic_close(inst);
+        wic_close_with_reason(inst, WIC_CLOSE_ABNORMAL_1, NULL, 0U);
     }
+}
+
+static void on_close_transport(struct wic_inst *inst)
+{
+    transport_close((int *)wic_get_app(inst));
 }
 
 static uint32_t do_random(struct wic_inst *inst)
 {
     return rand();
+}
+
+static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size)
+{
+    static uint8_t tx[UINT16_MAX+100UL];
+
+    *max_size = sizeof(tx);
+
+    return tx;
 }

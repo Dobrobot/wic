@@ -1,31 +1,18 @@
 MBED WIC Wrapper
 ================
 
-This example makes it a breeze to use WIC on MBED.
+This wrapper makes it a breeze to use WIC on MBED.
 
 ## WICClient
 
-This is a wrapper class for client mode.
+This is a wrapper class for client mode. Features/characteristics include:
 
-- supports TCP and TLS modes (determined by target URL)
-- supports redirects (with configurable maximum number of redirects)
-- blocking interfaces which must be called from a non-interrupt
-  context
-- handles full-duplex socket 'backpressure'
+- blocking interfaces
+- TCP and TLS modes (determined by URL)
+- responds to socket 'back-pressure'
+- long life object, no need to create/destroy for each connection
 
-WICClient makes use of a number of synchronisation features in
-order to work reliably in a multithreaded MBED application. These
-include:
-
-- dedicated threads for reading and writing
-- mailboxes for incoming and outgoing messages/fragments
-- event loop for serialising access to wic_inst and managing timing
-- mutex and condition variable on application facing interfaces to
-  implement blocking
-
-The application below will try to connect every 10 seconds. Once connected, it will
-send "hello world!" every 5 seconds. If the connection fails, it will return
-to trying to open the connection.
+An example:
 
 ~~~ c++
 #include "wic_client.hpp"
@@ -37,7 +24,7 @@ int main()
 
     eth.connect();
 
-    static WICClient client(eth);
+    static WICClient<1000, 1008> client(eth);
 
     for(;;){
 
