@@ -467,16 +467,6 @@ bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_
     return retval;
 }
 
-bool wic_send_pong(struct wic_inst *self)
-{
-    return send_pong_with_payload(self, NULL, 0U, WIC_FRAME_TYPE_PONG);
-}
-
-bool wic_send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size)
-{
-    return send_pong_with_payload(self, data, size, WIC_FRAME_TYPE_PONG);
-}
-
 void wic_parse(struct wic_inst *self, const void *data, size_t size)
 {
     struct wic_stream s;
@@ -1149,9 +1139,21 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
             case WIC_OPCODE_PING:
 
                 send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos, WIC_FRAME_TYPE_RESPONSE_PONG);
+
+                if(self->on_ping != NULL){
+
+                    self->on_ping(self);
+                }                
                 break;
             
             case WIC_OPCODE_PONG:
+
+                if(self->on_pong != NULL){
+
+                    self->on_pong(self);
+                }
+                break;
+            
             default:
                 break;
             }

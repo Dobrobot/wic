@@ -148,6 +148,10 @@ extern "C" {
 
 struct wic_inst;
 
+/** this information can be used to determine priority of an
+ * outgoing message
+ *
+ * */
 enum wic_frame_type {
 
     WIC_FRAME_TYPE_HTTP,            /**< handshake */
@@ -157,6 +161,17 @@ enum wic_frame_type {
     WIC_FRAME_TYPE_RESPONSE_PONG,   /**< pong (in response to ping) */
     WIC_FRAME_TYPE_CLOSE,           /**< close */
     WIC_FRAME_TYPE_RESPONSE_CLOSE   /**< close (in response to close) */
+};
+
+/** reason for handshake failure */
+enum wic_handshake_failure {
+
+    WIC_HANDSHAKE_FAILURE_ABNORMAL_1,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_1 */
+    WIC_HANDSHAKE_FAILURE_ABNORMAL_2,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_2 */    
+    WIC_HANDSHAKE_FAILURE_TLS,          /**< socket closed for reason WIC_CLOSE_TLS */  
+    WIC_HANDSHAKE_FAILURE_IRRELEVANT,   /**< another socket close reason not relevant to this mode */  
+    WIC_HANDSHAKE_FAILURE_PROTOCOL,     /**< response was not HTTP as expected */
+    WIC_HANDSHAKE_FAILURE_HTTP          /**< response did not upgrade to websocket */
 };
 
 /** Test message recevied event
@@ -193,18 +208,10 @@ typedef void (*wic_on_binary_fn)(struct wic_inst *inst, bool fin, const void *da
  * */
 typedef void (*wic_on_open_fn)(struct wic_inst *inst);
 
-/** reason for handshake failure */
-enum wic_handshake_failure {
-
-    WIC_HANDSHAKE_FAILURE_ABNORMAL_1,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_1 */
-    WIC_HANDSHAKE_FAILURE_ABNORMAL_2,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_2 */    
-    WIC_HANDSHAKE_FAILURE_TLS,          /**< socket closed for reason WIC_CLOSE_TLS */  
-    WIC_HANDSHAKE_FAILURE_IRRELEVANT,   /**< another socket close reason not relevant to this mode */  
-    WIC_HANDSHAKE_FAILURE_PROTOCOL,     /**< response was not HTTP as expected */
-    WIC_HANDSHAKE_FAILURE_HTTP          /**< response did not upgrade to websocket */
-};
-
-/** The handshake failed
+/** Handshake failed event
+ *
+ * @param[in] inst
+ * @param[in] reason
  *
  * */
 typedef void (*wic_on_handshake_failure_fn)(struct wic_inst *inst, enum wic_handshake_failure reason);
@@ -224,33 +231,36 @@ typedef void (*wic_on_close_fn)(struct wic_inst *inst, uint16_t code, const char
 
 /** Close transport event
  *
+ * Use this event to close the underlying transport. 
+ *
  * @param[in] inst
  * 
  * */
 typedef void (*wic_on_close_transport_fn)(struct wic_inst *inst);
 
-/** Release buffer previously requested by sending it
+/** Release buffer by sending it.
  *
- * Note that size may be set to zero when WIC needs to free a buffer
- * without sending anything.
+ * If size is zero, it means WIC is releasing a buffer but not sending
+ * anything.
  * 
  * @param[in] inst
  * @param[in] data
- * @param[in] size  size of data
- * @param[in] type
+ * @param[in] size  size of data (may be zero)
+ * @param[in] type  may be used for prioritisation
  *
  * */
 typedef void (*wic_on_send_fn)(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type);
 
-
 /** Get a buffer of a minimum size for transporting a particular
  * frame type.
  *
- * WIC will set min_size to zero if the minimum size is not known, such
- * as when type == WIC_FRAME_TYPE_HTTP.
+ * If WIC does not know the size required, it will set min_size to 0. This
+ * means provide the largest buffer. At the moment this only happens
+ * during the handshake (i.e. type == WIC_FRAME_TYPE_HTTP).
  *
- * Memory allocated from this handler can always be freed when
- * wic_on_send_fn is called.
+ * wic_on_send_fn will always be called after this handler. This is
+ * this is to provide an opportunity to free any allocates made in this
+ * handler.
  * 
  * @param[in] inst
  * @param[in] min_size  buffer should be at least this size
@@ -272,6 +282,20 @@ typedef void *(*wic_on_buffer_fn)(struct wic_inst *inst, size_t min_size, enum w
  * */
 typedef uint32_t (*wic_rand_fn)(struct wic_inst *inst);
 
+/** A ping was received and WIC responded with a pong
+ *
+ * @param[in] inst
+ *
+ * */
+typedef void (*wic_on_ping_fn)(struct wic_inst *inst);
+
+/** A pong was received
+ *
+ * @param[in] inst
+ *
+ * */
+typedef void (*wic_on_pong_fn)(struct wic_inst *inst);
+
 /** An instance is either a client or a server */
 enum wic_role {
 
@@ -290,49 +314,52 @@ enum wic_schema {
 /** wic_init() argument */
 struct wic_init_arg {
 
-    /** Buffer used to store received frame payload */
+    /** Buffer used to store received frame payload and received handshake */
     void *rx;    
 
-    /** Maximum size of rx
-     *
-     * 
-     *
-     * */
+    /** Maximum size of rx payload and received handshake */
     size_t rx_max;      
 
-    /** **OPTIONAL** pointer to text handler */
+    /** **OPTIONAL** handler called when text is received */
     wic_on_text_fn on_text;
 
-    /** **OPTIONAL** pointer to binary handler */
+    /** **OPTIONAL** handler called when binary is received */
     wic_on_binary_fn on_binary;
 
-    /** **OPTIONAL** pointer to open event handler */
+    /** **OPTIONAL** handler called when socket becomes open/established */
     wic_on_open_fn on_open;
 
-    /** **OPTIONAL** pointer to close event handler */
+    /** **OPTIONAL** handler called when open/established socket becomes closed */
     wic_on_close_fn on_close;
 
-    /** **OPTIONAL** pointer to close transport event handler */
+    /** **OPTIONAL** handler called underlying transport should be closed */
     wic_on_close_transport_fn on_close_transport;
 
-    /** **OPTIONAL** pointer to handshake failure event handler */
+    /** **OPTIONAL** handler called when handshake fails */
     wic_on_handshake_failure_fn on_handshake_failure;
 
-    /** Pointer to function that writes to transport */
-    wic_on_send_fn on_send;
+    /** **OPTIONAL** handler called when ping is received */
+    wic_on_ping_fn on_ping;
 
-    /** **OPTIONAL** pointer to function that returns random */
+    /** **OPTIONAL** handler called when pong is received */
+    wic_on_pong_fn on_pong;
+
+    /** **OPTIONAL** handler called to get a random number */
     wic_rand_fn rand;
 
+    /** handler called to write message to transport */
+    wic_on_send_fn on_send;
+
+    /** handler called to get a buffer (prior to calling wic_init_arg.on_send) */
     wic_on_buffer_fn on_buffer;
 
-    /** **OPTIONAL** pointer to any data you wish to associate with instance */
+    /** **OPTIONAL** any data you wish to associate with instance */
     void *app;
 
-    /** **OPTIONAL** null-terminate target URL required for client role */
+    /** **OPTIONAL** null-terminated URL required for client role */
     const char *url;
 
-    /** Instance can be client or server */
+    /** instance can be client or server */
     enum wic_role role;
 };
 
@@ -455,6 +482,9 @@ struct wic_inst {
     wic_on_buffer_fn on_buffer;
     
     wic_rand_fn rand;
+
+    wic_on_ping_fn on_ping;
+    wic_on_pong_fn on_pong;
     
     void *app;
 
@@ -606,14 +636,14 @@ void wic_close(struct wic_inst *self);
  * - #WIC_CLOSE_GOING_AWAY
  * - #WIC_CLOSE_PROTOCOL_ERROR
  * - #WIC_CLOSE_UNSUPPORTED
- * - #WIC_CLOSE_NO_STATUS
- * - #WIC_CLOSE_ABNORMAL
+ * - #WIC_CLOSE_ABNORMAL_1
+ * - #WIC_CLOSE_ABNORMAL_2
+ * - #WIC_CLOSE_TLS
  * - #WIC_CLOSE_INVALID_DATA
  * - #WIC_CLOSE_POLICY
  * - #WIC_CLOSE_TOO_BIG
  * - #WIC_CLOSE_EXTENSION_REQUIRED
  * - #WIC_CLOSE_UNEXPECTED_EXCEPTION
- * - #WIC_CLOSE_TRANSPORT_ERROR
  * 
  * */
 void wic_close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size);
@@ -672,35 +702,6 @@ bool wic_send_ping(struct wic_inst *self);
  *
  * */
 bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_t size);
-
-/** Send a Pong message
- *
- * A peer will not answer a Pong. This is useful for implementing a
- * non-confirmed "keep alive" feature.
- *
- * @param[in] self
- *
- * @retval true     message sent
- * @retval false 
- *
- * @see wic_send_pong_with_payload().
- * 
- * */
-bool wic_send_pong(struct wic_inst *self);
-
-/** Send a Pong message with application data
- *
- * @param[in] self
- * @param[in] data
- * @param[in] size  size of data
- *
- * @retval true     message sent
- * @retval false
- *
- * @see wic_send_pong()
- *
- * */
-bool wic_send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size);
 
 /** Set a header key-value that will be either sent as either:
  *

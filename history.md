@@ -13,6 +13,8 @@ History
   hanshake
 - added wic_on_close_transport_fn to simplify the task of ensuring
   that the transport gets closed
+- removed wic_send_pong* interfaces
+- added on_ping and on_pong handlers
 
 
 ## 0.1.0
