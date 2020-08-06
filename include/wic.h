@@ -157,10 +157,9 @@ enum wic_frame_type {
     WIC_FRAME_TYPE_HTTP,            /**< handshake */
     WIC_FRAME_TYPE_USER,            /**< text or binary */
     WIC_FRAME_TYPE_PING,            /**< ping */
-    WIC_FRAME_TYPE_PONG,            /**< pong */
-    WIC_FRAME_TYPE_RESPONSE_PONG,   /**< pong (in response to ping) */
+    WIC_FRAME_TYPE_PONG,            /**< pong (in response to ping) */
     WIC_FRAME_TYPE_CLOSE,           /**< close */
-    WIC_FRAME_TYPE_RESPONSE_CLOSE   /**< close (in response to close) */
+    WIC_FRAME_TYPE_CLOSE_RESPONSE   /**< close (in response to close) */
 };
 
 /** reason for handshake failure */

@@ -73,7 +73,7 @@ static const enum wic_opcode opcodes[] = {
 
 static size_t min_frame_size(enum wic_opcode opcode, bool masked, uint16_t payload_size);
 
-static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size, enum wic_frame_type type);
+static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size);
 static void close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size, enum wic_frame_type type);
 
 static bool allowed_to_send(struct wic_inst *self);
@@ -649,7 +649,7 @@ static size_t min_frame_size(enum wic_opcode opcode, bool masked, uint16_t paylo
     return retval;
 }
 
-static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size, enum wic_frame_type type)
+static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint16_t size)
 {
     bool retval = false;
     struct wic_stream tx;
@@ -662,7 +662,7 @@ static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint
         .opcode = WIC_OPCODE_PONG,
         .size = size,
         .payload = data,
-        .type = type
+        .type = WIC_FRAME_TYPE_PONG
     };
 
     if(allowed_to_send(self)){
@@ -671,7 +671,7 @@ static bool send_pong_with_payload(struct wic_inst *self, const void *data, uint
 
             self->state = WIC_STATE_OPEN;
 
-            self->on_send(self, tx.read, tx.pos, type);
+            self->on_send(self, tx.read, tx.pos, f.type);
             retval = true;
         }        
     }
@@ -1048,7 +1048,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                             if(utf8_is_invalid(self->rx.utf8)){
 
-                                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_FRAME_TYPE_CLOSE_RESPONSE);
                             }
                         }
                         break;
@@ -1109,11 +1109,11 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                     if(utf8_is_complete(self->rx.utf8)){
 
-                        close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code), WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                        close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code), WIC_FRAME_TYPE_CLOSE_RESPONSE);
                     }
                     else{
 
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE_RESPONSE);
                     }
                     break;
 
@@ -1121,15 +1121,15 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
                     if((code >= 3000U) && (code <= 3999)){
 
-                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_CLOSE_RESPONSE);
                     }
                     else if((code >= 4000U) && (code <= 4999)){
 
-                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                        close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_FRAME_TYPE_CLOSE_RESPONSE);
                     }
                     else{
                         
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_RESPONSE_CLOSE);
+                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_FRAME_TYPE_CLOSE_RESPONSE);
                     }
                     break;
                 }
@@ -1138,7 +1138,7 @@ static void parse_websocket(struct wic_inst *self, struct wic_stream *s)
 
             case WIC_OPCODE_PING:
 
-                send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos, WIC_FRAME_TYPE_RESPONSE_PONG);
+                send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos);
 
                 if(self->on_ping != NULL){
 

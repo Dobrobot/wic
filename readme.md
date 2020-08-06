@@ -5,19 +5,18 @@ WIC is a C99 implementation of [rfc6455](https://tools.ietf.org/html/rfc6455)
 websockets designed for embedded applications.
 
 WIC decouples the websocket protocol from the transport layer. This makes
-it possible to use WIC over any transport layer assuming you are prepared
+it possible to use WIC over any transport layer assuming that you are prepared
 to do the integration work.
 
-WIC is a work in progress:
+WIC is a work in progress. This means that:
 
 - server role is not supported yet
 - handshake implementation is not robust and is only exercised on the
   happy path
-- still working out the interfaces
+- interfaces are not stable
 
 ## Features
 
-- client role (server is todo)
 - doesn't call malloc
 - handshake header fields passed through to application
 - convenience functions for dissecting URLs
@@ -32,8 +31,6 @@ WIC is a work in progress:
 - handshake headers are only accessible at the moment a websocket
   becomes connected (i.e. wic_get_state() == WIC_STATE_READY)
 - doesn't support extensions
-- doesn't directly support proxies
-- doesn't automatically fragment the payload of outgoing messages
 - there are a bewildering number of function pointers
 
 The handshake field limitation is a consequence of storing header
@@ -113,7 +110,8 @@ static void on_close_transport_handler(struct wic_inst *inst)
     transport_close((int *)wic_get_app(inst));
 }
 
-static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type)
+static void on_send_handler(struct wic_inst *inst, const void *data,
+        size_t size, enum wic_frame_type type)
 {
     if(!transport_write(*(int *)wic_get_app(inst), data, size)){
 
@@ -121,7 +119,8 @@ static void on_send_handler(struct wic_inst *inst, const void *data, size_t size
     }
 }
 
-static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size)
+static void *on_buffer_handler(struct wic_inst *inst, size_t min_size,
+        enum wic_frame_type type, size_t *max_size)
 {
     static uint8_t tx[1000U];
 
