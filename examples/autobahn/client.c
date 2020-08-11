@@ -171,8 +171,13 @@ static uint32_t do_random(struct wic_inst *inst)
 static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size)
 {
     static uint8_t tx[UINT16_MAX+100UL];
+    void *retval = NULL;
 
-    *max_size = sizeof(tx);
+    if(min_size <= sizeof(tx)){
 
-    return tx;
+        *max_size = sizeof(tx);
+        retval = tx;
+    }
+
+    return retval;
 }
