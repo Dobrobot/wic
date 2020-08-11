@@ -319,6 +319,15 @@ struct wic_init_arg {
     /** Maximum size of rx payload and received handshake */
     size_t rx_max;      
 
+    /** Maximum size of sent payload
+     *
+     * Set this to non-zero to ensure that send requests will fail
+     * before calling on_buffer_fn for the reason of being
+     * too large.
+     * 
+     * */
+    size_t tx_max;
+
     /** **OPTIONAL** handler called when text is received */
     wic_on_text_fn on_text;
 
@@ -460,6 +469,17 @@ enum wic_header_state {
     WIC_HEADER_STATE_VALUE
 };
 
+enum wic_status {
+
+    WIC_STATUS_SUCCESS,         /**< operation complete successfully */
+    WIC_STATUS_NOT_OPEN,        /**< socket is not open */
+    WIC_STATUS_TOO_LARGE,       /**< message too large to send */
+    WIC_STATUS_WOULD_BLOCK,     /**< buffer not available */
+    WIC_STATUS_BAD_STATE,
+    WIC_STATUS_BAD_INPUT,
+    WIC_STATUS_TIMEOUT
+};
+
 /** WIC instance */
 struct wic_inst {
 
@@ -499,6 +519,7 @@ struct wic_inst {
 
     enum wic_opcode frag;
     uint16_t pos;
+    uint16_t tx_max;
 
     uint16_t utf8_tx;
     uint16_t utf8_rx;
@@ -594,11 +615,10 @@ const char *wic_get_redirect_url(const struct wic_inst *self);
  *
  * @param[in] self
  *
- * @retval true     driver started
- * @retval false
+ * @return #wic_status
  *
  * */
-bool wic_start(struct wic_inst *self);
+enum wic_status wic_start(struct wic_inst *self);
 
 /** Receive data from socket
  *
@@ -654,11 +674,15 @@ void wic_close_with_reason(struct wic_inst *self, uint16_t code, const char *rea
  * @param[in] data
  * @param[in] size  size of data
  *
- * @retval true     message sent
- * @retval false    
+ * @return #wic_status
+ *
+ * @retval WIC_STATUS_SUCCESS
+ * @retval WIC_STATUS_NOT_OPEN
+ * @retval WIC_STATUS_WOULD_BLOCK
+ * @retval WIC_STATUS_TOO_LARGE
  *
  * */
-bool wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size);
+enum wic_status wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size);
 
 /** Send a text message
  *
@@ -667,11 +691,15 @@ bool wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t
  * @param[in] data
  * @param[in] size  size of data
  *
- * @retval true     message sent
- * @retval false    
+ * @return #wic_status
+ *
+ * @retval WIC_STATUS_SUCCESS
+ * @retval WIC_STATUS_NOT_OPEN
+ * @retval WIC_STATUS_WOULD_BLOCK
+ * @retval WIC_STATUS_TOO_LARGE    
  *
  * */
-bool wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
+enum wic_status wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
 
 /** Send a Ping message
  *
@@ -680,13 +708,17 @@ bool wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t s
  *
  * @param[in] self
  *
- * @retval true     message sent
- * @retval false
+ * @return #wic_status
+ *
+ * @retval WIC_STATUS_SUCCESS
+ * @retval WIC_STATUS_NOT_OPEN
+ * @retval WIC_STATUS_WOULD_BLOCK
+ * @retval WIC_STATUS_TOO_LARGE
  *
  * @see wic_send_ping_with_payload().
  * 
  * */
-bool wic_send_ping(struct wic_inst *self);
+enum wic_status wic_send_ping(struct wic_inst *self);
 
 /** Send a Ping message with application data
  * 
@@ -694,13 +726,17 @@ bool wic_send_ping(struct wic_inst *self);
  * @param[in] data
  * @param[in] size  size of data
  *
- * @retval true     message sent
- * @retval false
+ * @return #wic_status
+ *
+ * @retval WIC_STATUS_SUCCESS
+ * @retval WIC_STATUS_NOT_OPEN
+ * @retval WIC_STATUS_WOULD_BLOCK
+ * @retval WIC_STATUS_TOO_LARGE
  *
  * @see wic_send_ping()
  *
  * */
-bool wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_t size);
+enum wic_status wic_send_ping_with_payload(struct wic_inst *self, const void *data, uint16_t size);
 
 /** Set a header key-value that will be either sent as either:
  *
@@ -768,7 +804,6 @@ void wic_rewind_get_next_header(struct wic_inst *self);
  *
  * */
 enum wic_state wic_get_state(const struct wic_inst *self);
-
 
 #ifdef __cplusplus
 }
