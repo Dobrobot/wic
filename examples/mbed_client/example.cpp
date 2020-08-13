@@ -1,3 +1,24 @@
+/* Copyright (c) 2020 Cameron Harper
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * */
+
 #include "wic_client.hpp"
 #include "EthernetInterface.h"
 
@@ -25,28 +46,20 @@ int main()
 {
     static EthernetInterface eth;
 
-    eth.connect();
+    nsapi_error_t err = eth.connect();
 
-    static WICClient<1000,1012> client(eth);
+    static WIC::Client<1000,1012> client(eth);
 
     client.on_text(callback(on_text));
     client.on_binary(callback(on_binary));
     client.on_open(callback(on_open));
     client.on_close(callback(on_close));
-    
+
+    client.open("ws://192.168.1.108:9001/getCaseCount");
+
     for(;;){
 
-        if(client.open("wss://echo.websocket.org/")){
 
-            while(client.is_open()){
-
-                client.text("hello world!");
-                wait_us(5000);
-            }        
-        }
-        else{
-
-            wait_us(10000);
-        }
+        wait_us(1000);
     }
 }

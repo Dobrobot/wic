@@ -19,46 +19,56 @@
  *
  * */
 
+#ifndef WIC_CLIENT_HPP
+#define WIC_CLIENT_HPP
+
 #include "mbed.h"
 #include "wic.h"
 #include "TLSSocket.h"
 #include "wic_output_queue.hpp"
+#include "wic_input_queue.hpp"
+#include "wic_buffer.hpp"
 
 namespace WIC {
 
     class ClientBase {
-    };
-
-    template<size_t RX_MAX = 1000, size_t TX_MAX = 1012>
-    class Client : public ClientBase {
 
         protected:
 
-            uint8_t rx[RX_MAX];
-            OutputQueue<TX_MAX> output;
-            Mail<Buffer<RX_MAX>, 1> input;
+            enum State {
+
+                CLOSED,
+                OPEN
+
+            } state;
 
             static const uint32_t socket_open_flag = 1U;
 
             NetworkInterface &interface;
+
+            BufferBase& rx;            
+            InputQueueBase& input;
+            OutputQueueBase& output;
             
             TCPSocket tcp;
             TLSSocketWrapper tls;
             Socket &socket;            
             Mutex mutex;
-            ConditionVariable condition;
+            Semaphore wakeup;
             EventQueue events;
             EventFlags flags;
 
-            struct {
+            struct Job {
 
-                int timeout_id;
-                bool *done;
-                enum wic_status *retval;
-                BufferBase *buf;
-                
-            } job;
+                bool done;
+                enum wic_handshake_failure failure;
+                enum wic_status status;
+            };
 
+            int timeout_id;
+            BufferBase *tx;
+            Job job;
+            
             Thread writer_thread;        
             Thread reader_thread;
             Thread event_thread;
@@ -72,487 +82,76 @@ namespace WIC {
             Callback<void()> on_open_cb;
             Callback<void(uint16_t, const char *, uint16_t)> on_close_cb;
 
-            static Client *to_obj(struct wic_inst *self)
-            {       
-                return static_cast<Client *>(wic_get_app(self));
-            }
+            static ClientBase *to_obj(struct wic_inst *self);
+            static void handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_frame_type type);
+            static void *handle_buffer(struct wic_inst *self, size_t size, enum wic_frame_type type, size_t *max);
+            static uint32_t handle_rand(struct wic_inst *self);
+            static void handle_handshake_failure(struct wic_inst *self, enum wic_handshake_failure reason);
+            static void handle_open(struct wic_inst *self);
+            static void handle_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
+            static void handle_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size);
+            static void handle_close(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size);
+            static void handle_close_transport(struct wic_inst *self);
 
-            static void handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_frame_type type)
-            {
-                Client *obj = to_obj(self);
+            /* these are requested via public methods */
+            void do_open(const char *url);
+            void do_close();
+            void do_send_text(bool fin, const char *value, uint16_t size);
+            void do_send_binary(bool fin, const void *value, uint16_t size);
 
-                if(obj->job.buf){
+            void do_parse();            
+            void do_transport_error();
+            void do_handshake_timeout();
 
-                    obj->job.buf->size = size;
-                    obj->output.put(&obj->job.buf);
-                }                
-            }
+            void writer_task();
+            void reader_task();
 
-            static void *handle_buffer(struct wic_inst *self, size_t size, enum wic_frame_type type, size_t *max)
-            {
-                void *retval = NULL;
-                Client *obj = to_obj(self);
+        public:
 
-                obj->job.buf = obj->output.alloc(type, size);
+            ClientBase(NetworkInterface &interface, BufferBase &rx, InputQueueBase &input, OutputQueueBase &output);
 
-                if(obj->job.buf){
+            enum wic_status open(const char *url);
 
-                    *max = obj->job.buf->max;
-                    retval = obj->job.buf->data;
-                }
+            void close();
 
-                return retval;
-            }
+            enum wic_status text(const char *value);
+            enum wic_status text(const char *value, uint16_t size);
+            enum wic_status text(bool fin, const char *value);
+            enum wic_status text(bool fin, const char *value, uint16_t size);
             
-            static uint32_t handle_rand(struct wic_inst *self)
-            {
-                return rand();
-            }
+            enum wic_status binary(const void *value, uint16_t size);
+            enum wic_status binary(bool fin, const void *value, uint16_t size);
             
-            static void handle_handshake_failure(struct wic_inst *self, enum wic_handshake_failure reason)
-            {
-                Client *obj = to_obj(self);
-
-                obj->events.cancel(obj->job.timeout_id);
-
-                *obj->job.done = true;
-                obj->condition.notify_all();
-            }
+            bool is_open();
             
-            static void handle_open(struct wic_inst *self)
-            {
-                Client *obj = to_obj(self);
-
-                obj->events.cancel(obj->job.timeout_id);
-                
-                if(obj->on_open_cb){
-
-                    obj->on_open_cb();
-                }
-            }
+            void on_text(Callback<void(bool,const char *, uint16_t)> handler);            
+            void on_binary(Callback<void(bool,const void *, uint16_t)> handler);
+            void on_open(Callback<void()> handler);
+            void on_close(Callback<void(uint16_t, const char *, uint16_t)> handler);
             
-            static void handle_text(struct wic_inst *self, bool fin, const char *data, uint16_t size)
-            {
-                Client *obj = to_obj(self);
-                
-                if(obj->on_text_cb){
+            nsapi_error_t set_root_ca_cert(const void *root_ca, size_t len);
+            nsapi_error_t set_root_ca_cert(const char *root_ca_pem);
+            nsapi_error_t set_client_cert_key(const char *client_cert_pem, const char *client_private_key_pem);
+            nsapi_error_t set_client_cert_key(const void *client_cert_pem, size_t client_cert_len, const void *client_private_key_pem, size_t client_private_key_len);            
+    };
 
-                    obj->on_text_cb(fin, data, size);
-                }    
-            }
-            
-            static void handle_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size)
-            {
-                Client *obj = to_obj(self);
-                
-                if(obj->on_binary_cb){
+    template<size_t RX_MAX, size_t TX_MAX>
+    class Client : public ClientBase {
 
-                    obj->on_binary_cb(fin, data, size);
-                }   
-            }
+        protected:
 
-            static void handle_close(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size)
-            {
-                Client *obj = to_obj(self);
-        
-                if(obj->on_close_cb){
+            Buffer<RX_MAX> _rx;
+            OutputQueue<TX_MAX> _output;
+            InputQueue<RX_MAX> _input;
 
-                    obj->on_close_cb(code, reason, size);
-                }
-            }
-            
-            static void handle_close_transport(struct wic_inst *self)
-            {
-                to_obj(self)->socket.close();
-            }
-            
-            void do_parse()
-            {
-                Buffer<RX_MAX> *buf;
-                osEvent evt = input.get();
-
-                if(evt.status == osEventMail){
-
-                    buf = (Buffer<RX_MAX> *)evt.value.p;
-                    
-                    wic_parse(&inst, buf->data, buf->size);
-
-                    input.free(buf);
-                }
-            }
-            
-            void do_open(bool &done, enum wic_status &retval, const char *url)
-            {
-                SocketAddress a;
-                nsapi_error_t err;
-
-                struct wic_init_arg init_arg = {0};
-
-                init_arg.app = this;
-                
-                init_arg.rx = rx;
-                init_arg.rx_max = sizeof(rx);
-
-                init_arg.on_open = handle_open;
-                init_arg.on_close = handle_close;
-                init_arg.on_text = handle_text;
-                init_arg.on_binary = handle_binary;
-                init_arg.on_close_transport = handle_close_transport;
-                init_arg.on_handshake_failure = handle_handshake_failure;
-
-                init_arg.on_send = handle_send;
-                init_arg.on_buffer = handle_buffer;
-                init_arg.rand = handle_rand;
-                
-                init_arg.role = WIC_ROLE_CLIENT;
-                
-                init_arg.url = url;
-                
-                if(!wic_init(&inst, &init_arg)){
-
-                    done = true;
-                    condition.notify_all();
-                    return;
-                }
-
-                schema = wic_get_url_schema(&inst);
-
-                err = interface.gethostbyname(wic_get_url_hostname(&inst), &a);
-
-                if(err != NSAPI_ERROR_OK){
-
-                    done = true;
-                    condition.notify_all();                    
-                    return;
-                }
-
-                a.set_port(wic_get_url_port(&inst));
-
-                switch(schema){
-                default:
-                case WIC_SCHEMA_HTTP:
-                case WIC_SCHEMA_WS:
-                    socket = tcp;                    
-                    break;    
-                case WIC_SCHEMA_HTTPS:    
-                case WIC_SCHEMA_WSS:
-                    socket = tls;
-                    break;
-                }
-
-                err = tcp.open(&interface);
-
-                err = tcp.connect(a);
-
-                if(err != NSAPI_ERROR_OK){
-
-                    socket.close();
-                    condition.notify_all();
-                    done = true;
-                    return;
-                }
-
-                if(wic_start(&inst) != WIC_STATUS_SUCCESS){
-
-                    done = true;
-                    return;
-                }
-
-                //__asm__("BKPT");
-
-                flags.set(socket_open_flag);
-
-                job.timeout_id = events.call_in(5000, callback(this, &Client::do_handshake_timeout));
-                job.done = &done;    
-                job.retval = &retval;    
-            }
-            
-            void do_close(bool &done)
-            {
-                wic_close(&inst);
-                done = true;
-                condition.notify_all();
-            }
-            
-            void do_send_text(bool &done, enum wic_status &retval, bool fin, const char *value, uint16_t size)
-            {
-                retval = wic_send_text(&inst, fin, value, size);
-                done = true;
-                condition.notify_all();        
-            }
-            
-            void do_send_binary(bool &done, enum wic_status &retval, bool fin, const void *value, uint16_t size)
-            {
-                retval = wic_send_binary(&inst, fin, value, size);
-                done = true;
-                condition.notify_all();        
-            }
-
-            void do_transport_error()
-            {
-                wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
-            }
-            
-            void do_handshake_timeout()
-            {
-                wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_1, NULL, 0U);
-            }
-            
-            void writer_task(void)
-            {
-                BufferBase *buf;
-                nsapi_size_or_error_t ret;
-                
-                for(;;){
-
-                    flags.wait_any(socket_open_flag);
-
-                    //__asm__("BKPT");
-
-                    for(;;){
-
-                        buf = output.get();
-
-                        if(buf){
-
-                            size_t pos = 0U;
-
-                            do{
-
-                                ret = socket.send(&buf->data[pos], buf->size - pos);
-
-                                if(ret >= 0){
-
-                                    pos += ret;
-                                }
-                            }
-                            while((ret >= 0) && (pos < buf->size));
-
-                            output.free(&buf);
-
-                            if(ret < 0){
-
-                                events.call(callback(this, &Client::do_transport_error));
-                                break;
-                            }                            
-                        }
-                    }
-
-                    flags.clear(socket_open_flag);
-                }
-            }
-            
-            void reader_task(void)
-            {
-                nsapi_size_or_error_t retval;
-                
-                for(;;){
-
-                    flags.wait_any(socket_open_flag);
-
-                    for(;;){
-
-                        auto buf = input.alloc();
-
-                        retval = socket.recv(buf->data, sizeof(buf->data));
-
-                        if(retval < 0){
-
-                            events.call(callback(this, &Client::do_transport_error));
-
-                            input.free(buf);    
-                            break;
-                        }
-                        else{
-                        
-                            buf->size = retval;
-
-                            input.put(buf);
-                            
-                            events.call(this, &Client::do_parse);
-                        }
-                    }
-
-                    flags.clear(socket_open_flag);
-                }
-            }
-     
         public:
 
             Client(NetworkInterface &interface) :
-                interface(interface),
-                tls(&tcp),
-                socket(tcp),
-                condition(mutex),
-                schema(WIC_SCHEMA_WS)
-            {                
-                writer_thread.start(callback(this, &Client::writer_task));
-                reader_thread.start(callback(this, &Client::reader_task));
-                event_thread.start(callback(&events, &EventQueue::dispatch_forever));
-            }
-
-            enum wic_status open(const char *url)
+                ClientBase(interface, _rx, _input, _output)
             {
-                printf("open()\n");
+            };
 
-                enum wic_status retval = WIC_STATUS_SUCCESS;
-                bool done = false;
-                
-                mutex.lock();
-
-                printf("enqueue()\n");
-
-                events.call(callback(this, &Client::do_open), done, retval, url);
-
-                while(!done){
-
-                    printf("waiting...\n");
-                
-                    condition.wait();
-                }
-
-                mutex.unlock();
-
-                printf("done!\n");
-
-                return retval;
-            }
-
-            void close()
-            {
-                mutex.lock();
-
-                bool done = false;
-
-                events.call(callback(this, &Client::do_close), done);
-
-                while(!done){
-                
-                    condition.wait();
-                }
-
-                mutex.unlock();
-            }
-
-            enum wic_status text(const char *value)
-            {
-                return text(true, value);
-            }
-            
-            enum wic_status text(const char *value, uint16_t size)
-            {
-                return text(true, value, size);
-            }
-            
-            enum wic_status text(bool fin, const char *value)
-            {
-                enum wic_status retval = WIC_STATUS_SUCCESS;
-                int size = strlen(value);
-
-                if(size >= 0){
-
-                    retval = text(fin, value, (uint16_t)size);
-                }
-
-                return retval;
-            }
-            
-            enum wic_status text(bool fin, const char *value, uint16_t size)
-            {
-                enum wic_status retval = WIC_STATUS_SUCCESS;
-                bool done = false;
-
-                mutex.lock();
-
-                //while(output.full_for(WIC_FRAME_TYPE_USER)){
-
-                  //  condition.wait();
-                //}
-
-                events.call(callback(this, &Client::do_send_text), done, retval, fin, value, size);
-
-                while(!done){
-                
-                    condition.wait();
-                }
-
-                mutex.unlock();
-
-                return retval;
-            }
-
-            enum wic_status binary(const void *value, uint16_t size)
-            {
-                return binary(true, value, size);
-            }
-            
-            enum wic_status binary(bool fin, const void *value, uint16_t size)
-            {
-                enum wic_status retval;
-                bool done = false;
-
-                mutex.lock();
-
-                while(output.full_for(WIC_FRAME_TYPE_USER)){
-
-                    condition.wait();
-                }
-
-                events.call(callback(this, &Client::do_send_binary), done, retval, fin, value, size);
-
-                while(!done){
-                
-                    condition.wait();
-                }
-
-                mutex.unlock();
-
-                return retval;
-            }
-
-            bool is_open()
-            {
-                return(wic_get_state(&inst) == WIC_STATE_OPEN);
-            }
-
-            void on_text(Callback<void(bool,const char *, uint16_t)> handler)
-            {
-                on_text_cb = handler;
-            }
-
-            void on_binary(Callback<void(bool,const void *, uint16_t)> handler)
-            {
-                on_binary_cb = handler;
-            }
-
-            void on_open(Callback<void()> handler)
-            {
-                on_open_cb = handler;
-            }
-
-            void on_close(Callback<void(uint16_t, const char *, uint16_t)> handler)
-            {
-                on_close_cb = handler;
-            }
-
-            nsapi_error_t set_root_ca_cert(const void *root_ca, size_t len)
-            {
-                return tls.set_root_ca_cert(root_ca, len);
-            }
-
-            nsapi_error_t set_root_ca_cert(const char *root_ca_pem)
-            {
-                return tls.set_root_ca_cert(root_ca_pem);
-            }
-
-            nsapi_error_t set_client_cert_key(const char *client_cert_pem, const char *client_private_key_pem)
-            {
-                return tls.set_client_cert_key(client_cert_pem, client_private_key_pem);
-            }
-
-            nsapi_error_t set_client_cert_key(const void *client_cert_pem, size_t client_cert_len, const void *client_private_key_pem, size_t client_private_key_len)
-            {
-                return tls.set_client_cert_key(client_cert_pem, client_cert_len, client_private_key_pem, client_private_key_len);
-            }
     };
 };
+
+#endif

@@ -126,7 +126,7 @@ static void *on_buffer_handler(struct wic_inst *inst, size_t min_size,
 
     *max_size = sizeof(tx);
 
-    return tx;
+    return (min_size <= sizeof(tx)) ? tx : NULL;
 }
 ~~~
 

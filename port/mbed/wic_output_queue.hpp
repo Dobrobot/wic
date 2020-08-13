@@ -19,13 +19,23 @@
  *
  * */
 
+#ifndef WIC_OUTPUT_QUEUE_HPP
+#define WIC_OUTPUT_QUEUE_HPP
+
 #include "mbed.h"
 #include "wic.h"
-#include "wic_output_buffer.hpp"
+#include "wic_buffer.hpp"
 
 namespace WIC {
 
-    class OutputQueueBase {        
+    class OutputQueueBase {
+
+        public:
+
+            virtual BufferBase *alloc(enum wic_frame_type type, size_t min_size) = 0;
+            virtual void put(BufferBase **buf) = 0;
+            virtual void free(BufferBase **buf) = 0;
+            virtual BufferBase *get() = 0;
     };
 
     template<size_t MAX_SIZE>
@@ -138,3 +148,4 @@ namespace WIC {
     };
 }
 
+#endif

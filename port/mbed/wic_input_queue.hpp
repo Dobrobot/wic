@@ -19,62 +19,75 @@
  *
  * */
 
+#ifndef WIC_INPUT_QUEUE_HPP
+#define WIC_INPUT_QUEUE_HPP
+
 #include "mbed.h"
+#include "wic_buffer.hpp"
 
 namespace WIC {
 
-    class BufferBase {
+    class InputQueueBase {
 
         public:
 
-            const uint32_t mask;
-            const uint32_t priority;
-            
-            size_t size;
-            size_t max;
-            uint8_t *data;
-
-            BufferBase(uint32_t mask, uint32_t priority)
-                : mask(mask), priority(priority)
-            {}
+            virtual BufferBase *alloc() = 0;
+            virtual void put(BufferBase **buf) = 0;
+            virtual void free(BufferBase **buf) = 0;
+            virtual BufferBase *get() = 0;
     };
 
     template<size_t MAX_SIZE>
-    class Buffer : public BufferBase {
-        
+    class InputQueue : public InputQueueBase {
+
         protected:
 
-            uint8_t _data[MAX_SIZE];
-            
+            rtos::Mail<Buffer<MAX_SIZE>, 1> mail;
+
         public:
 
-            Buffer()
+            BufferBase *alloc()
             {
-                data = _data;
-                max = sizeof(_data);
+                return static_cast<BufferBase *>(new(mail.alloc_for(osWaitForever)) Buffer<MAX_SIZE>);                
             }
 
-            Buffer(uint32_t mask, uint32_t priority)
-                : BufferBase(mask, priority)
+            void put(BufferBase **buf)
             {
-                data = _data;
-                max = sizeof(_data);
-            }
-            
-            bool init(const void *data, size_t size)
-            {
-                bool retval = false;
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+
+                if(ptr){
                 
-                if(size <= sizeof(_data)){
-
-                    (void)memcpy(_data, data, size);
-                    this->size = size;
-
-                    retval = true;
+                    mail.put(static_cast<Buffer<MAX_SIZE> *>(ptr));                    
                 }
-                
+            }
+
+            void free(BufferBase **buf)
+            {
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+
+                if(ptr){
+
+                    mail.free(static_cast<Buffer<MAX_SIZE> *>(ptr));
+                }
+            }
+
+            BufferBase *get()
+            {
+                BufferBase *retval = nullptr;
+                osEvent evt = mail.get();
+
+                if(evt.status == osEventMail){
+
+                    retval = static_cast<BufferBase *>(evt.value.p);
+                }
+
                 return retval;
             }
     };
-};
+}
 
+#endif
