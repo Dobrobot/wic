@@ -19,74 +19,41 @@
  *
  * */
 
-#ifndef WIC_INPUT_QUEUE_HPP
-#define WIC_INPUT_QUEUE_HPP
+#ifndef WIC_INPUT_POOL_HPP
+#define WIC_INPUT_POOL_HPP
 
 #include "mbed.h"
 #include "wic_buffer.hpp"
 
 namespace WIC {
 
-    class InputQueueBase {
+    class InputPoolBase {
 
         public:
 
             virtual BufferBase *alloc() = 0;
-            virtual void put(BufferBase **buf) = 0;
-            virtual void free(BufferBase **buf) = 0;
-            virtual BufferBase *get() = 0;
+            virtual void free(BufferBase *buf) = 0;
     };
 
     template<size_t MAX_SIZE>
-    class InputQueue : public InputQueueBase {
+    class InputPool : public InputPoolBase {
 
         protected:
 
-            rtos::Mail<Buffer<MAX_SIZE>, 1> mail;
+            rtos::MemoryPool<Buffer<MAX_SIZE>, 1> pool;
 
         public:
 
             BufferBase *alloc()
             {
-                return static_cast<BufferBase *>(new(mail.alloc_for(osWaitForever)) Buffer<MAX_SIZE>);                
+                return static_cast<BufferBase *>(new(pool.alloc_for(osWaitForever)) Buffer<MAX_SIZE>);                
             }
 
-            void put(BufferBase **buf)
+            void free(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
-
-                *buf = nullptr;
-
-                if(ptr){
-                
-                    mail.put(static_cast<Buffer<MAX_SIZE> *>(ptr));                    
-                }
+                pool.free(static_cast<Buffer<MAX_SIZE> *>(buf));
             }
-
-            void free(BufferBase **buf)
-            {
-                BufferBase *ptr = *buf;
-
-                *buf = nullptr;
-
-                if(ptr){
-
-                    mail.free(static_cast<Buffer<MAX_SIZE> *>(ptr));
-                }
-            }
-
-            BufferBase *get()
-            {
-                BufferBase *retval = nullptr;
-                osEvent evt = mail.get();
-
-                if(evt.status == osEventMail){
-
-                    retval = static_cast<BufferBase *>(evt.value.p);
-                }
-
-                return retval;
-            }
+            
     };
 }
 

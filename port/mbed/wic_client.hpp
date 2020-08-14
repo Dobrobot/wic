@@ -26,7 +26,7 @@
 #include "wic.h"
 #include "TLSSocket.h"
 #include "wic_output_queue.hpp"
-#include "wic_input_queue.hpp"
+#include "wic_input_pool.hpp"
 #include "wic_buffer.hpp"
 
 namespace WIC {
@@ -42,40 +42,45 @@ namespace WIC {
 
             } state;
 
-            static const uint32_t socket_open_flag = 1U;
+            static const uint32_t start_reader_flag = 1U;
+            static const uint32_t start_writer_flag = 2U;
+            static const uint32_t reader_on_flag = 4U;
+            static const uint32_t writer_on_flag = 8U;
 
             NetworkInterface &interface;
 
             BufferBase& rx;            
-            InputQueueBase& input;
+            InputPoolBase& input;
             OutputQueueBase& output;
+            BufferBase& url;
             
             TCPSocket tcp;
             TLSSocketWrapper tls;
             Socket &socket;            
             Mutex mutex;
-            Semaphore wakeup;
+            ConditionVariable condition;
             EventQueue events;
             EventFlags flags;
+
+            static const uint32_t max_redirects = 3U;
 
             struct Job {
 
                 bool done;
-                enum wic_handshake_failure failure;
+                nsapi_error_t retval;
                 enum wic_status status;
+                enum wic_handshake_failure handshake_failure_reason;
             };
 
             int timeout_id;
             BufferBase *tx;
             Job job;
-            
+
             Thread writer_thread;        
             Thread reader_thread;
             Thread event_thread;
 
             struct wic_inst inst;
-
-            enum wic_schema schema;
 
             Callback<void(bool,const char *, uint16_t)> on_text_cb;
             Callback<void(bool,const void *, uint16_t)> on_binary_cb;
@@ -99,58 +104,95 @@ namespace WIC {
             void do_send_text(bool fin, const char *value, uint16_t size);
             void do_send_binary(bool fin, const void *value, uint16_t size);
 
-            void do_parse();            
-            void do_transport_error();
+            void do_parse(BufferBase *buf);            
+            void do_transport_error(nsapi_error_t status);
             void do_handshake_timeout();
 
             void writer_task();
             void reader_task();
 
+            void notify()
+            {
+                mutex.lock();
+                condition.notify_one();
+                mutex.unlock();                
+            }
+
         public:
 
-            ClientBase(NetworkInterface &interface, BufferBase &rx, InputQueueBase &input, OutputQueueBase &output);
+            ClientBase(NetworkInterface &interface, BufferBase &rx, InputPoolBase &input, OutputQueueBase &output, BufferBase &url);
 
-            enum wic_status open(const char *url);
+            /** Open the websocket
+             *
+             * @param[in] url
+             *
+             * @return nsapi_error_t
+             *
+             * open will return one of the following codes:
+             * 
+             * @retval NSAPI_ERROR_OK                   success
+             * @retval NSAPI_ERROR_PARAMETER            badly formatted URL
+             * @retval NSAPI_ERROR_IS_CONNECTED         already open
+             * @retval NSAPI_ERROR_CONNECTION_LOST      socket closed unexpectedly
+             * @retval NSAPI_ERROR_CONNECTION_TIMEOUT   socket timeout
+             *
+             * */
+            nsapi_error_t open(const char *url);
 
+            /* close an open websocket */
             void close();
 
+            //bool set_header(String key, String value);
+            //bool get_header(String key, String &value);
+            
+            //bool enable_ping(uint32_t interval, uint32_t response_time);
+            //bool disable_ping();
+
+            /* send UTF8 text
+             *
+             * these return wic_status since NSAPI is too generic to
+             * distinguish between "too large to send event"
+             *  */
             enum wic_status text(const char *value);
             enum wic_status text(const char *value, uint16_t size);
             enum wic_status text(bool fin, const char *value);
             enum wic_status text(bool fin, const char *value, uint16_t size);
-            
+
+            /* send binary */
             enum wic_status binary(const void *value, uint16_t size);
             enum wic_status binary(bool fin, const void *value, uint16_t size);
-            
+
+            /* is websocket open? */
             bool is_open();
-            
+
+            /* set callbacks */
             void on_text(Callback<void(bool,const char *, uint16_t)> handler);            
             void on_binary(Callback<void(bool,const void *, uint16_t)> handler);
             void on_open(Callback<void()> handler);
             void on_close(Callback<void(uint16_t, const char *, uint16_t)> handler);
-            
+
+            /* TLS settings */
             nsapi_error_t set_root_ca_cert(const void *root_ca, size_t len);
             nsapi_error_t set_root_ca_cert(const char *root_ca_pem);
             nsapi_error_t set_client_cert_key(const char *client_cert_pem, const char *client_private_key_pem);
             nsapi_error_t set_client_cert_key(const void *client_cert_pem, size_t client_cert_len, const void *client_private_key_pem, size_t client_private_key_len);            
     };
 
-    template<size_t RX_MAX, size_t TX_MAX>
+    template<size_t RX_MAX, size_t TX_MAX, size_t URL_MAX = 200>
     class Client : public ClientBase {
 
         protected:
 
             Buffer<RX_MAX> _rx;
             OutputQueue<TX_MAX> _output;
-            InputQueue<RX_MAX> _input;
-
+            InputPool<RX_MAX> _input;
+            Buffer<URL_MAX> _url;
+            
         public:
 
             Client(NetworkInterface &interface) :
-                ClientBase(interface, _rx, _input, _output)
-            {
-            };
-
+                ClientBase(interface, _rx, _input, _output, _url)
+            {};
     };
 };
 

@@ -506,24 +506,33 @@ void wic_parse(struct wic_inst *self, const void *data, size_t size)
 
             WIC_ERROR("http parser reports error: (%u %s) %s", self->http.http_errno, http_errno_name(self->http.http_errno), http_errno_description(self->http.http_errno))
 
-            self->state = WIC_STATE_CLOSED;
-
             if(self->on_close_transport != NULL){
 
                 self->on_close_transport(self);
             }
+
+            if(self->on_handshake_failure != NULL){
+
+                if(self->http.http_errno == HPE_CB_message_complete){
+
+                    self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_UPGRADE);
+                }
+                else{
+
+                    self->on_handshake_failure(self, WIC_HANDSHAKE_FAILURE_PROTOCOL);
+                }
+            }
+
+            self->state = WIC_STATE_CLOSED;
         }
         else{
 
-            if(self->state == WIC_STATE_READY){
+            if(self->on_open != NULL){
 
-                if(self->on_open != NULL){
+                self->on_open(self);
+            }
 
-                    self->on_open(self);
-                }
-
-                self->state = WIC_STATE_OPEN;                
-            }        
+            self->state = WIC_STATE_OPEN;                            
         }
 
         stream_init_ro(&s, &((const uint8_t *)data)[bytes], size-bytes);
@@ -628,6 +637,11 @@ bool wic_set_header(struct wic_inst *self, struct wic_header *header)
 enum wic_state wic_get_state(const struct wic_inst *self)
 {
     return self->state;
+}
+
+size_t wic_get_max_tx(const struct wic_inst *self)
+{
+    return (self->tx_max == 0U) ? SIZE_MAX : self->tx_max;
 }
 
 /* static functions ***************************************************/
@@ -1824,11 +1838,8 @@ static int on_response_complete(http_parser *http)
     WIC_ASSERT((b64_encoded_size(sizeof(self->hash))+1U) == sizeof(b64_hash))
     
     switch(self->header_state){
-    case WIC_HEADER_STATE_IDLE:
+    default:
         break;
-    case WIC_HEADER_STATE_FIELD:
-        WIC_ERROR("unexpected state")
-        return -1;    
     case WIC_HEADER_STATE_VALUE:
         stream_put_u8(&self->rx.s, 0U);
         break;
@@ -1839,40 +1850,20 @@ static int on_response_complete(http_parser *http)
     if(http->status_code != 101){
 
         switch(http->status_code){
-        case 404U:            
         case 300U:
         case 301U:
         case 302U:
         case 303U:
         case 304U:
         case 307U:
-
-            WIC_DEBUG("redirect response received")
-
-            header = wic_get_header(self, "location");
-
-            if(header == NULL){
-
-                WIC_DEBUG("location field is missing (cannot redirect)")
-                return -1;
-            }
-            else{
-
-                WIC_DEBUG("redirect to %s", header)
-                self->redirect_url = header;
-            }
-
-            //handshake failure
-            //wic_close_with_reason(self, WIC_CLOSE_TRANSPORT_ERROR, NULL, 0U);
-            return -1;
-            break;
-
+            self->redirect_url = wic_get_header(self, "location");
+            break;            
         default:
+            break;
+        }
 
-            WIC_DEBUG("unexpected status code '%d'", http->status_code)
-            //handshake failrue
-            return -1;
-        }        
+        WIC_DEBUG("unexpected status code")
+        return -1;
     }
 
     /* expecting to have recevieved Connection: Upgrade */
@@ -1914,8 +1905,6 @@ static int on_response_complete(http_parser *http)
         WIC_DEBUG("unexpected Sec-WebSocket-Accept field value")
         return -1;
     }
-
-    self->state = WIC_STATE_READY;
 
     return 0;
 }

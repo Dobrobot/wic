@@ -33,9 +33,10 @@ namespace WIC {
         public:
 
             virtual BufferBase *alloc(enum wic_frame_type type, size_t min_size) = 0;
-            virtual void put(BufferBase **buf) = 0;
-            virtual void free(BufferBase **buf) = 0;
+            virtual void put(BufferBase *buf) = 0;
+            virtual void free(BufferBase *buf) = 0;
             virtual BufferBase *get() = 0;
+            virtual void clear() = 0;
     };
 
     template<size_t MAX_SIZE>
@@ -102,34 +103,21 @@ namespace WIC {
                 return retval;
             }
 
-            void put(BufferBase **buf)
+            void put(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
+                if(buf->size > 0U){
 
-                if(ptr){
-
-                    *buf = nullptr;
-
-                    if(ptr->size > 0U){
-
-                        queue.put(ptr, ptr->priority);
-                    }
-                    else{
-
-                        free(&ptr);
-                    }
+                    queue.put(buf, buf->priority);
                 }
+                else{
+
+                    free(buf);
+                }                
             }
 
-            void free(BufferBase **buf)
+            void free(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
-
-                if(ptr){
-
-                    *buf = nullptr;
-                    flags.clear(ptr->mask);                    
-                }
+                flags.clear(buf->mask);                                
             }
             
             BufferBase *get()
@@ -144,6 +132,25 @@ namespace WIC {
 
                     return nullptr;
                 }
+            }
+
+            void clear()
+            {
+                BufferBase *buf;
+                osEvent evt;
+
+                do{
+
+                    evt = queue.get(0);
+                    
+                    if(evt.status == osEventMessage){
+
+                        buf = static_cast<BufferBase *>(evt.value.p);
+
+                        free(buf);
+                    }
+                }
+                while(evt.status == osEventMessage);                
             }
     };
 }

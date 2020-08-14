@@ -22,31 +22,40 @@
 #include "wic_client.hpp"
 #include "EthernetInterface.h"
 
+#define PUTS(...) do{\
+    printf(__VA_ARGS__);\
+    printf("\n");\
+    fflush(stdout);\
+}while(0);
+    
+
 void on_text(bool fin, const char *value, uint16_t size)
 {
-    printf("got text: %.*s\n", size, value);
+    PUTS("got text: %.*s", size, value);
 }
 
 void on_binary(bool fin, const void *value, uint16_t size)
 {
-    printf("got binary: <not shown>\n");
+    PUTS("got binary: <not shown>");
 }
 
 void on_open(void)
 {
-    printf("websocket is open!\n");
+    PUTS("websocket is open!");
 }
 
 void on_close(uint16_t code, const char *reason, uint16_t size)
 {
-    printf("websocket closed (%u)", code);
+    PUTS("websocket closed (%u)", code);
 }
 
 int main()
 {
+    //printf("starting!\n");
+
     static EthernetInterface eth;
 
-    nsapi_error_t err = eth.connect();
+    eth.connect();
 
     static WIC::Client<1000,1012> client(eth);
 
@@ -57,9 +66,9 @@ int main()
 
     client.open("ws://192.168.1.108:9001/getCaseCount");
 
-    for(;;){
+    for(int i=0;;i++){
 
-
-        wait_us(1000);
+        //printf("hey %d\n", i);
+        wait_us(2000000);
     }
 }

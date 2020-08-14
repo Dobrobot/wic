@@ -162,15 +162,17 @@ enum wic_frame_type {
     WIC_FRAME_TYPE_CLOSE_RESPONSE   /**< close (in response to close) */
 };
 
-/** reason for handshake failure */
+/** reason for handshake failure
+ *
+ * */
 enum wic_handshake_failure {
 
     WIC_HANDSHAKE_FAILURE_ABNORMAL_1,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_1 */
-    WIC_HANDSHAKE_FAILURE_ABNORMAL_2,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_2 */    
-    WIC_HANDSHAKE_FAILURE_TLS,          /**< socket closed for reason WIC_CLOSE_TLS */  
+    WIC_HANDSHAKE_FAILURE_ABNORMAL_2,   /**< socket closed for reason WIC_CLOSE_ABNORMAL_2 */
+    WIC_HANDSHAKE_FAILURE_TLS,          /**< socket closed for some TLS specific reason */
     WIC_HANDSHAKE_FAILURE_IRRELEVANT,   /**< another socket close reason not relevant to this mode */  
     WIC_HANDSHAKE_FAILURE_PROTOCOL,     /**< response was not HTTP as expected */
-    WIC_HANDSHAKE_FAILURE_HTTP          /**< response did not upgrade to websocket */
+    WIC_HANDSHAKE_FAILURE_UPGRADE       /**< response did not upgrade to websocket (e.g. perhaps it was a redirect) */
 };
 
 /** Test message recevied event
@@ -804,6 +806,15 @@ void wic_rewind_get_next_header(struct wic_inst *self);
  *
  * */
 enum wic_state wic_get_state(const struct wic_inst *self);
+
+/** The maximum size of payload
+ *
+ * @param[in] self
+ *
+ * @return maximum payload size
+ * 
+ * */
+size_t wic_get_max_tx(const struct wic_inst *self);
 
 #ifdef __cplusplus
 }

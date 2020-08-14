@@ -4,15 +4,17 @@ using namespace WIC;
 
 /* constructors *******************************************************/
 
-ClientBase::ClientBase(NetworkInterface &interface, BufferBase& rx, InputQueueBase& input, OutputQueueBase& output) :
+ClientBase::ClientBase(NetworkInterface &interface, BufferBase& rx, InputPoolBase& input, OutputQueueBase& output, BufferBase& url) :
     interface(interface),
     rx(rx),
     input(input),
     output(output),
+    url(url),
     tls(&tcp),
     socket(tcp),
-    wakeup(0, 1),
-    schema(WIC_SCHEMA_WS)
+    condition(mutex),
+    event_thread(10000),
+    events(100 * EVENTS_EVENT_SIZE)
 {                
     writer_thread.start(callback(this, &ClientBase::writer_task));
     reader_thread.start(callback(this, &ClientBase::reader_task));
@@ -35,7 +37,7 @@ ClientBase::handle_send(struct wic_inst *self, const void *data, size_t size, en
     if(obj->tx){
 
         obj->tx->size = size;
-        obj->output.put(&obj->tx);
+        obj->output.put(obj->tx);
     }                
 }
 
@@ -69,9 +71,40 @@ ClientBase::handle_handshake_failure(struct wic_inst *self, enum wic_handshake_f
 
     obj->events.cancel(obj->timeout_id);
 
-    obj->job.status = WIC_STATUS_TIMEOUT;
+    obj->job.handshake_failure_reason = reason;
+
+    switch(reason){
+    default:
+    /* no response within timeout (either socket or message timeout) */
+    case WIC_HANDSHAKE_FAILURE_ABNORMAL_1:
+        //obj->job.retval = NSAPI_ERROR_;
+        break;
+        
+    /* socket closed / transport errored */
+    case WIC_HANDSHAKE_FAILURE_ABNORMAL_2:
+        //obj->job.retval = ;
+        break;
+        
+    /* response was not HTTP */
+    case WIC_HANDSHAKE_FAILURE_PROTOCOL:
+        //obj->job.retval = ;
+        break;
+        
+    /* impossible */
+    case WIC_HANDSHAKE_FAILURE_TLS:
+        break;
+        
+    case WIC_HANDSHAKE_FAILURE_IRRELEVANT:
+        break;
+
+    /* connection was not upgraded */
+    case WIC_HANDSHAKE_FAILURE_UPGRADE:
+        obj->job.retval = NSAPI_ERROR_OK;
+        break;
+    }
+
     obj->job.done = true;
-    obj->wakeup.release();
+    obj->notify();
 }
 
 void
@@ -80,15 +113,17 @@ ClientBase::handle_open(struct wic_inst *self)
     ClientBase *obj = to_obj(self);
 
     obj->events.cancel(obj->timeout_id);
+
+    obj->state = OPEN;
     
     if(obj->on_open_cb){
 
         obj->on_open_cb();
     }
 
-    obj->job.status = WIC_STATUS_SUCCESS;
+    obj->job.retval = NSAPI_ERROR_OK;
     obj->job.done = true;
-    obj->wakeup.release();
+    obj->notify();
 }
 
 void
@@ -118,6 +153,8 @@ ClientBase::handle_close(struct wic_inst *self, uint16_t code, const char *reaso
 {
     ClientBase *obj = to_obj(self);
 
+    obj->state = CLOSED;
+
     if(obj->on_close_cb){
 
         obj->on_close_cb(code, reason, size);
@@ -133,15 +170,10 @@ ClientBase::handle_close_transport(struct wic_inst *self)
 /* protected **********************************************************/
 
 void
-ClientBase::do_parse()
+ClientBase::do_parse(BufferBase *buf)
 {
-    BufferBase *buf = input.get();
-
-    if(buf){
-
-        wic_parse(&inst, buf->data, buf->size);
-        input.free(&buf);
-    }
+    wic_parse(&inst, buf->data, buf->size);
+    input.free(buf);
 }
 
 void
@@ -155,9 +187,9 @@ ClientBase::do_open(const char *url)
     /* already open */
     if(state == OPEN){
 
-        job.status = WIC_STATUS_BAD_STATE;
+        job.retval = NSAPI_ERROR_IS_CONNECTED;
         job.done = true;
-        wakeup.release();
+        notify();
         return;
     }
 
@@ -183,27 +215,25 @@ ClientBase::do_open(const char *url)
     
     if(!wic_init(&inst, &init_arg)){
 
-        job.status = WIC_STATUS_TIMEOUT;
+        job.retval = NSAPI_ERROR_PARAMETER;
         job.done = true;
-        wakeup.release();
+        notify();
         return;
     }
-
-    schema = wic_get_url_schema(&inst);
 
     err = interface.gethostbyname(wic_get_url_hostname(&inst), &a);
 
     if(err != NSAPI_ERROR_OK){
-
-        job.status = WIC_STATUS_TIMEOUT;
+        
+        job.retval = err;
         job.done = true;
-        wakeup.release();
+        notify();
         return;
     }
 
     a.set_port(wic_get_url_port(&inst));
 
-    switch(schema){
+    switch(wic_get_url_schema(&inst)){
     default:
     case WIC_SCHEMA_HTTP:
     case WIC_SCHEMA_WS:
@@ -215,52 +245,62 @@ ClientBase::do_open(const char *url)
         break;
     }
 
-    err = tcp.open(&interface);
+    (void)tcp.open(&interface);
 
-    err = tcp.connect(a);
+    err = socket.connect(a);
 
     if(err != NSAPI_ERROR_OK){
 
         socket.close();
-        job.status = WIC_STATUS_TIMEOUT;
+        job.retval = err;
         job.done = true;
-        wakeup.release();
+        notify();
         return;
     }
 
     if(wic_start(&inst) != WIC_STATUS_SUCCESS){
 
-        job.status = WIC_STATUS_TIMEOUT;
+        //job.retval = ;
         job.done = true;
-        wakeup.release();
+        notify();
         return;
     }
 
-    flags.set(socket_open_flag);
-    
+    flags.set(start_reader_flag | start_writer_flag);
+
     timeout_id = events.call_in(5000, callback(this, &ClientBase::do_handshake_timeout));        
 }
 
 void
 ClientBase::do_close()
 {
-    wic_close(&inst);    
+    wic_close(&inst);
+
+    //wait for reader/writer thread to park
+
+    job.done = true;
+    job.retval = NSAPI_ERROR_OK;
+    notify();
 }
 
 void
 ClientBase::do_send_text(bool fin, const char *value, uint16_t size)
 {
-    wic_send_text(&inst, fin, value, size);
+    job.status = wic_send_text(&inst, fin, value, size);
+    job.done = true;
+    notify();
 }
 
 void
 ClientBase::do_send_binary(bool fin, const void *value, uint16_t size)
 {
-    wic_send_binary(&inst, fin, value, size);
+    job.status = wic_send_binary(&inst, fin, value, size);
+    job.done = true;
+    notify();
 }
 
 void
-ClientBase::do_transport_error()
+ClientBase::do_transport_error(nsapi_error_t status)
 {
     wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
 }
@@ -275,11 +315,12 @@ void
 ClientBase::writer_task()
 {
     BufferBase *buf;
-    nsapi_size_or_error_t ret;
+    nsapi_size_or_error_t retval;
+    size_t pos;
     
     for(;;){
 
-        flags.wait_any(socket_open_flag, osWaitForever, false);
+        flags.wait_any(start_writer_flag);
 
         for(;;){
 
@@ -287,31 +328,42 @@ ClientBase::writer_task()
 
             if(buf){
 
-                size_t pos = 0U;
+                pos = 0U;
 
                 do{
 
-                    ret = socket.send(&buf->data[pos], buf->size - pos);
+                    retval = socket.send(&buf->data[pos], buf->size - pos);
 
-                    if(ret >= 0){
+                    if(retval >= 0){
 
-                        pos += ret;
+                        pos += retval;
                     }
                 }
-                while((ret >= 0) && (pos < buf->size));
+                while((retval >= 0) && (pos < buf->size));
 
-                output.free(&buf);
-                wakeup.release();
-            
-                if(ret < 0){
+                /* if this buffer contains a close, ensure output queue is clear */
+                if(buf->priority == 2){
 
-                    events.call(callback(this, &ClientBase::do_transport_error));
+                    output.free(buf);                    
+                    notify();
+                    socket.close();
                     break;
-                }                            
+                }
+                else{
+
+                    output.free(buf);
+                    notify();
+            
+                    if(retval < 0){
+
+                        events.call(callback(this, &ClientBase::do_transport_error), retval);
+                        break;
+                    }
+                }
             }
         }
 
-        flags.clear(socket_open_flag);
+        output.clear();
     }
 }
 
@@ -323,7 +375,7 @@ ClientBase::reader_task()
     
     for(;;){
 
-        flags.wait_any(socket_open_flag, osWaitForever, false);
+        flags.wait_any(start_reader_flag);
 
         for(;;){
 
@@ -333,43 +385,70 @@ ClientBase::reader_task()
 
             if(retval < 0){
 
-                events.call(callback(this, &ClientBase::do_transport_error));
-                input.free(&buf);    
+                events.call(callback(this, &ClientBase::do_transport_error), retval);
+                input.free(buf);    
                 break;
             }
             else{
             
                 buf->size = retval;
-
-                input.put(&buf);
-                
-                events.call(this, &ClientBase::do_parse);
+                events.call(callback(this, &ClientBase::do_parse), buf);
             }
         }
 
-        flags.clear(socket_open_flag);
+        flags.clear(reader_on_flag);
     }
 }
 
 /* public *************************************************************/
 
-enum wic_status
+nsapi_error_t
 ClientBase::open(const char *url)
 {
-    enum wic_status retval;
+    nsapi_error_t retval;
 
     mutex.lock();
 
-    job = {0};
+    //for(;;){
 
-    events.call(callback(this, &ClientBase::do_open), url);
+        job = {};
 
-    while(!job.done){
+        //this->url.size = strlen(url_ptr);
+        //strcpy((char *)this->url.data, url_ptr);
+        
+        events.call(callback(this, &ClientBase::do_open), url);
 
-        wakeup.acquire();
-    }
+        while(!job.done){
 
-    retval = job.status;
+            condition.wait();
+        }
+
+#if 0
+        if(
+            (job.handshake_failure_reason == WIC_HANDSHAKE_FAILURE_UPGRADE)
+            &&
+            (wic_get_redirect_url(&inst) != NULL)
+            &&
+            (n > 0U)
+        ){
+
+            n--;
+
+            url_ptr = wic_get_redirect_url(&inst);
+
+            if(strlen(url_ptr) >= this->url.max){
+
+                // redirect URL too large
+                break;
+            }
+        }
+        else{
+
+            retval = job.retval;
+            break;
+        }
+#endif        
+    //}
 
     mutex.unlock();
     
@@ -387,7 +466,7 @@ ClientBase::close()
 
     while(!job.done){
 
-        wakeup.acquire();
+        condition.wait();
     }
 
     mutex.unlock();
@@ -423,7 +502,7 @@ enum wic_status
 ClientBase::text(bool fin, const char *value, uint16_t size)
 {
     enum wic_status retval;
-
+    
     mutex.lock();
 
     for(;;){
@@ -434,14 +513,14 @@ ClientBase::text(bool fin, const char *value, uint16_t size)
 
         while(!job.done){
 
-            wakeup.acquire();
+            condition.wait();
         }
 
         retval = job.status;
 
         if(job.status == WIC_STATUS_WOULD_BLOCK){
 
-            wakeup.acquire();
+            condition.wait();
         }
         else{
 
@@ -475,14 +554,14 @@ ClientBase::binary(bool fin, const void *value, uint16_t size)
 
         while(!job.done){
 
-            wakeup.acquire();
+            condition.wait();
         }
 
         retval = job.status;
 
         if(job.status == WIC_STATUS_WOULD_BLOCK){
 
-            wakeup.acquire();
+            condition.wait();
         }
         else{
 
