@@ -99,7 +99,7 @@ namespace WIC {
             static void handle_close_transport(struct wic_inst *self);
 
             /* these are requested via public methods */
-            void do_open(const char *url);
+            void do_open();
             void do_close();
             void do_send_text(bool fin, const char *value, uint16_t size);
             void do_send_binary(bool fin, const void *value, uint16_t size);

@@ -13,7 +13,6 @@ ClientBase::ClientBase(NetworkInterface &interface, BufferBase& rx, InputPoolBas
     tls(&tcp),
     socket(tcp),
     condition(mutex),
-    event_thread(10000),
     events(100 * EVENTS_EVENT_SIZE)
 {                
     writer_thread.start(callback(this, &ClientBase::writer_task));
@@ -177,7 +176,7 @@ ClientBase::do_parse(BufferBase *buf)
 }
 
 void
-ClientBase::do_open(const char *url)
+ClientBase::do_open()
 {
     SocketAddress a;
     nsapi_error_t err;
@@ -211,7 +210,7 @@ ClientBase::do_open(const char *url)
     
     init_arg.role = WIC_ROLE_CLIENT;
     
-    init_arg.url = url;
+    init_arg.url = (const char *)url.data;
     
     if(!wic_init(&inst, &init_arg)){
 
@@ -405,25 +404,36 @@ ClientBase::reader_task()
 nsapi_error_t
 ClientBase::open(const char *url)
 {
-    nsapi_error_t retval;
+    uint32_t n = max_redirects;
+    nsapi_error_t retval = NSAPI_ERROR_PARAMETER;
+    const char *url_ptr = url;
 
     mutex.lock();
 
-    //for(;;){
+    for(;;){
 
         job = {};
 
-        //this->url.size = strlen(url_ptr);
-        //strcpy((char *)this->url.data, url_ptr);
+        /* URLs cannot be larger than what we can
+         * buffer.
+         *
+         * We buffer so as to support
+         * redirects */
+        if(strlen(url_ptr) >= this->url.max){
+
+            break;
+        }
+
+        this->url.size = strlen(url_ptr)+1U;
+        strcpy((char *)this->url.data, url_ptr);
         
-        events.call(callback(this, &ClientBase::do_open), url);
+        events.call(callback(this, &ClientBase::do_open));
 
         while(!job.done){
 
             condition.wait();
         }
 
-#if 0
         if(
             (job.handshake_failure_reason == WIC_HANDSHAKE_FAILURE_UPGRADE)
             &&
@@ -433,22 +443,14 @@ ClientBase::open(const char *url)
         ){
 
             n--;
-
             url_ptr = wic_get_redirect_url(&inst);
-
-            if(strlen(url_ptr) >= this->url.max){
-
-                // redirect URL too large
-                break;
-            }
         }
         else{
 
             retval = job.retval;
             break;
         }
-#endif        
-    //}
+    }
 
     mutex.unlock();
     
