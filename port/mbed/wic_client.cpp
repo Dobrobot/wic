@@ -6,17 +6,18 @@ using namespace WIC;
 
 /* constructors *******************************************************/
 
-ClientBase::ClientBase(NetworkInterface &interface, BufferBase& rx, InputPoolBase& input, OutputQueueBase& output, BufferBase& url) :
+ClientBase::ClientBase(NetworkInterface &interface, UserQueueBase& user_queue, InputPoolBase& rx_pool, OutputQueueBase& tx_queue, BufferBase& url) :
     interface(interface),
-    rx(rx),
-    input_pool(input),
-    output_queue(output),
+    user_queue(user_queue),
+    rx_pool(rx_pool),
+    tx_queue(tx_queue),    
     url(url),
     tls(&tcp),
     socket(tcp),
     condition(mutex),
     events(100 * EVENTS_EVENT_SIZE)
 {                
+    rx = user_queue.alloc();
     socket.sigio(callback(this, &ClientBase::do_sigio));
     worker_thread.start(callback(this, &ClientBase::worker_task));
     ticker.attach_us(callback(this, &ClientBase::do_tick), 1000000UL);
@@ -38,7 +39,7 @@ ClientBase::handle_send(struct wic_inst *self, const void *data, size_t size, en
     if(obj->tx){
 
         obj->tx->size = size;
-        obj->output_queue.put(&obj->tx);
+        obj->tx_queue.put(&obj->tx);
     }                
 }
 
@@ -48,7 +49,7 @@ ClientBase::handle_buffer(struct wic_inst *self, size_t size, enum wic_buffer ty
     void *retval = NULL;
     ClientBase *obj = to_obj(self);
 
-    obj->tx = obj->output_queue.alloc(type, size, max);
+    obj->tx = obj->tx_queue.alloc(type, size, max);
 
     if(obj->tx){
 
@@ -124,19 +125,19 @@ ClientBase::handle_message(struct wic_inst *self, enum wic_encoding encoding, bo
 {
     bool retval = false;
     ClientBase *obj = to_obj(self);
-    struct Message *ptr = obj->host_mail.alloc();
+    BufferBase *ptr = obj->user_queue.alloc();
 
     if(ptr){
 
+        /* the rx buffer inside wic_inst is from the user_queue memory
+         * pool so overrun is impossible */
+
         ptr->encoding = encoding;
         ptr->fin = fin;
-
-        assert(sizeof(ptr->data) >= size);
-
         ptr->size = size;
         (void)memcpy(ptr->data, data, size);
-
-        obj->host_mail.put(ptr);
+        
+        obj->user_queue.put(&ptr);
 
         retval = true;
     }
@@ -161,7 +162,7 @@ void
 ClientBase::handle_close_transport(struct wic_inst *self)
 {
     /* this ensures that the output queue is flushed */
-    to_obj(self)->output_queue.put(nullptr);        
+    to_obj(self)->tx_queue.put(nullptr);        
 }
 
 void
@@ -220,8 +221,8 @@ ClientBase::do_open()
 
     init_arg.app = this;
     
-    init_arg.rx = rx.data;
-    init_arg.rx_max = rx.max;
+    init_arg.rx = rx->data;
+    init_arg.rx_max = rx->max;
 
     init_arg.on_open = handle_open;
     init_arg.on_close = handle_close;
@@ -344,35 +345,32 @@ ClientBase::worker_task()
         /* try to get an RX buffer */
         if(!_rx){
 
-            _rx = input_pool.alloc();
+            _rx = rx_pool.alloc();
             rx_pos = 0U;
         }
 
         /* try to read the socket if there is an RX buffer */
-        if(_rx){
+        if(_rx && (_rx->size == 0U)){
 
-            if(_rx->size == 0U){
+            retval = socket.recv(_rx->data, _rx->max);
 
-                retval = socket.recv(_rx->data, _rx->max);
+            if(retval > 0){
 
-                if(retval > 0){
-
-                    _rx->size = retval;
-                }
-                else{
-
-                    switch(retval){
-                    case NSAPI_ERROR_WOULD_BLOCK:
-                    case NSAPI_ERROR_NO_SOCKET:
-                        break;
-                    default:
-
-                        wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
-                        do_work();                    
-                        input_pool.free(&_rx);
-                    }
-                }
+                _rx->size = retval;
             }
+            else{
+
+                switch(retval){
+                case NSAPI_ERROR_WOULD_BLOCK:
+                case NSAPI_ERROR_NO_SOCKET:
+                    break;
+                default:
+
+                    wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
+                    do_work();                    
+                    rx_pool.free(&_rx);
+                }
+            }            
         }
 
         /* try to parse the data read from socket */
@@ -384,14 +382,14 @@ ClientBase::worker_task()
 
             if(rx_pos == _rx->size){
 
-                input_pool.free(&_rx);
+                rx_pool.free(&_rx);
             }
         }
 
         /* try to get a TX buffer */
         if(!_tx){
 
-            _tx = output_queue.get();
+            _tx = tx_queue.get();
             tx_pos = 0U;
         }
 
@@ -406,7 +404,7 @@ ClientBase::worker_task()
 
                 if(tx_pos == _tx->size){
 
-                    output_queue.free(&_tx);
+                    tx_queue.free(&_tx);
                     notify();
                 }
             }
@@ -420,7 +418,7 @@ ClientBase::worker_task()
 
                     wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
                     do_work();
-                    output_queue.free(&_tx);
+                    tx_queue.free(&_tx);
                     notify();
                     break;
                 }                    
@@ -554,10 +552,10 @@ nsapi_size_or_error_t
 ClientBase::recv(enum wic_encoding& encoding, bool &fin, char *buffer, uint32_t timeout)
 {
     nsapi_size_or_error_t retval = NSAPI_ERROR_WOULD_BLOCK;
-    struct Message *ptr;
+    BufferBase *ptr;
     osEvent evt;
 
-    evt = host_mail.get(timeout);
+    evt = user_queue.get(timeout);
 
     switch(evt.status){
     case osEventMessage:
@@ -568,14 +566,14 @@ ClientBase::recv(enum wic_encoding& encoding, bool &fin, char *buffer, uint32_t 
         }
         else{
 
-            ptr = static_cast<struct Message *>(evt.value.p);
+            ptr = static_cast<BufferBase *>(evt.value.p);
 
             encoding = ptr->encoding;
             fin = ptr->fin;
             (void)memcpy(buffer, ptr->data, ptr->size);
             retval = ptr->size;
 
-            host_mail.free(ptr);
+            user_queue.free(&ptr);
         }
 
         do_work();

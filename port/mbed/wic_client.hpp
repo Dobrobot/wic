@@ -28,6 +28,7 @@
 #include "wic_output_queue.hpp"
 #include "wic_input_pool.hpp"
 #include "wic_buffer.hpp"
+#include "wic_user_queue.hpp"
 
 namespace WIC {
 
@@ -46,24 +47,19 @@ namespace WIC {
 
             NetworkInterface &interface;
 
-            BufferBase& rx;            
-            InputPoolBase& input_pool;
-            OutputQueueBase& output_queue;
+            UserQueueBase& user_queue;            
+            InputPoolBase& rx_pool;
+            OutputQueueBase& tx_queue;
             BufferBase& url;
+
+            /* these are the buffers that wic_inst directly
+             * interacts with */
+            BufferBase *rx;
+            BufferBase *tx;
 
             Semaphore work;
             Ticker ticker;
 
-            struct Message {
-
-                enum wic_encoding encoding;
-                bool fin;
-                char data[1000U];
-                uint16_t size;
-            };
-
-            Mail<struct Message, 2> host_mail;
-            
             TCPSocket tcp;
             TLSSocketWrapper tls;
             Socket &socket;
@@ -83,7 +79,7 @@ namespace WIC {
             };
 
             int timeout_id;
-            BufferBase *tx;
+            
             Job job;
 
             Thread worker_thread;
@@ -141,7 +137,7 @@ namespace WIC {
 
         public:
 
-            ClientBase(NetworkInterface &interface, BufferBase &rx, InputPoolBase &input, OutputQueueBase &output, BufferBase &url);
+            ClientBase(NetworkInterface &interface, UserQueueBase& user_queue, InputPoolBase& rx_pool, OutputQueueBase& tx_queue, BufferBase& url);
 
             /** Open the websocket
              *
@@ -227,15 +223,15 @@ namespace WIC {
 
         protected:
 
-            Buffer<RX_MAX> _rx;
-            OutputQueue<TX_MAX> _output;
-            InputPool<RX_MAX> _input;
+            UserQueue<RX_MAX, 2U> _user_queue;
+            OutputQueue<TX_MAX> _tx_queue;
+            InputPool<RX_MAX> _rx_pool;
             Buffer<URL_MAX> _url;
             
         public:
 
             Client(NetworkInterface &interface) :
-                ClientBase(interface, _rx, _input, _output, _url)
+                ClientBase(interface, _user_queue, _rx_pool, _tx_queue, _url)
             {};
     };
 };

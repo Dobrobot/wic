@@ -33,8 +33,9 @@ namespace WIC {
         public:
 
             virtual BufferBase *alloc(enum wic_buffer type, size_t min_size, size_t *max) = 0;
-            virtual void put(BufferBase **buf) = 0;
             virtual void free(BufferBase **buf) = 0;
+
+            virtual void put(BufferBase **buf) = 0;            
             virtual BufferBase *get() = 0;            
     };
 

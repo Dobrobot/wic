@@ -19,75 +19,69 @@
  *
  * */
 
-#ifndef WIC_BUFFER_HPP
-#define WIC_BUFFER_HPP
+#ifndef WIC_USER_QUEUE_HPP
+#define WIC_USER_QUEUE_HPP
 
 #include "mbed.h"
-#include "wic.h"
+#include "wic_buffer.hpp"
 
 namespace WIC {
 
-    class BufferBase {
+    class UserQueueBase {
 
         public:
 
-            uint8_t *data;
+            virtual BufferBase *alloc() = 0;
+            virtual void free(BufferBase **buf) = 0;
 
-            const uint32_t mask;
-            const uint32_t priority;
-            
-            size_t size;
-            size_t max;
-
-            enum wic_encoding encoding;
-            bool fin;
-            
-            BufferBase()
-                : mask(0),priority(0)
-            {}
-
-            BufferBase(uint32_t mask, uint32_t priority)
-                : mask(mask), priority(priority)
-            {}
+            virtual void put(BufferBase **buf) = 0;            
+            virtual osEvent get(uint32_t timeout) = 0;         
     };
 
-    template<size_t MAX_SIZE>
-    class Buffer : public BufferBase {
-        
+    template<size_t SIZE, size_t DEPTH>
+    class UserQueue : public UserQueueBase {
+
         protected:
 
-            uint8_t _data[MAX_SIZE];
-            
+            rtos::Mail<Buffer<SIZE>, DEPTH> mail;
+
         public:
 
-            Buffer()
+            BufferBase *alloc()
             {
-                data = _data;
-                max = sizeof(_data);
+                return static_cast<BufferBase *>(mail.alloc());
             }
 
-            Buffer(uint32_t mask, uint32_t priority)
-                : BufferBase(mask, priority)
+            void free(BufferBase **buf)
             {
-                data = _data;
-                max = sizeof(_data);
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+
+                if(ptr){
+                
+                    mail.free(static_cast<Buffer<SIZE> *>(ptr));
+                }
+            }
+
+            osEvent get(uint32_t timeout)
+            {
+                return mail.get(timeout);                
+            }
+
+            void put(BufferBase **buf)
+            {
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+
+                if(ptr){
+
+                    mail.put(static_cast<Buffer<SIZE> *>(ptr));
+                }
             }
             
-            bool init(const void *data, size_t size)
-            {
-                bool retval = false;
-                
-                if(size <= sizeof(_data)){
-
-                    (void)memcpy(_data, data, size);
-                    this->size = size;
-
-                    retval = true;
-                }
-                
-                return retval;
-            }
     };
-};
+}
 
 #endif
