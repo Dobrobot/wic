@@ -23,6 +23,7 @@
 #define WIC_BUFFER_HPP
 
 #include "mbed.h"
+#include "wic.h"
 
 namespace WIC {
 
@@ -30,13 +31,14 @@ namespace WIC {
 
         public:
 
+            uint8_t *data;
+
             const uint32_t mask;
             const uint32_t priority;
             
             size_t size;
             size_t max;
-            uint8_t *data;
-
+            
             BufferBase()
                 : mask(0),priority(0)
             {}

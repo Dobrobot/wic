@@ -148,18 +148,23 @@ extern "C" {
 
 struct wic_inst;
 
-/** this information can be used to determine priority of an
- * outgoing message
+/** this enum is used to communicate the purpose of the buffer
  *
  * */
-enum wic_frame_type {
+enum wic_buffer {
 
-    WIC_FRAME_TYPE_HTTP,            /**< handshake */
-    WIC_FRAME_TYPE_USER,            /**< text or binary */
-    WIC_FRAME_TYPE_PING,            /**< ping */
-    WIC_FRAME_TYPE_PONG,            /**< pong (in response to ping) */
-    WIC_FRAME_TYPE_CLOSE,           /**< close */
-    WIC_FRAME_TYPE_CLOSE_RESPONSE   /**< close (in response to close) */
+    WIC_BUFFER_HTTP,            /**< handshake */
+    WIC_BUFFER_USER,            /**< text or binary */
+    WIC_BUFFER_PING,            /**< ping */
+    WIC_BUFFER_PONG,            /**< pong (in response to ping) */
+    WIC_BUFFER_CLOSE,           /**< close */
+    WIC_BUFFER_CLOSE_RESPONSE   /**< close (in response to close) */
+};
+
+enum wic_encoding {
+
+    WIC_ENCODING_UTF8,
+    WIC_ENCODING_BINARY
 };
 
 /** reason for handshake failure
@@ -175,25 +180,29 @@ enum wic_handshake_failure {
     WIC_HANDSHAKE_FAILURE_UPGRADE       /**< response did not upgrade to websocket (e.g. perhaps it was a redirect) */
 };
 
-/** Test message recevied event
+/** Binary or UTF8 message received
  *
  * @param[in] inst
- * @param[in] fin   true if the final fragment
- * @param[in] data  UTF8
- * @param[in] size  size of data
+ * @param[in] encoding  binary or utf8
+ * @param[in] fin       true if the final fragment
+ * @param[in] data  
+ * @param[in] size      size of data
+ *
+ * @retval true     message accepted
+ * @retval false    host is blocked and cannot receive
+ *
+ * This function has a return value to indicate if the host was ready
+ * to accept the message. If the host returns false the message
+ * will remain buffered in wic_inst and will be passed to this function
+ * next time wic_parse is called.
+ *
+ * The behaviour can be used to implement 'back-pressure' on messages received.
+ * For example, the host may queue received messages and the queue may
+ * become full. In this situation wic should block (i.e. stop parsing
+ * new input data) to ensure that messages are not dropped.
  *
  * */
-typedef void (*wic_on_text_fn)(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
-
-/** Binary message received event
- *
- * @param[in] inst
- * @param[in] fin   true if the final fragment
- * @param[in] data 
- * @param[in] size  size of data
- *
- * */
-typedef void (*wic_on_binary_fn)(struct wic_inst *inst, bool fin, const void *data, uint16_t size);
+typedef bool (*wic_on_message_fn)(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 
 /** Websocket open event
  *
@@ -250,7 +259,7 @@ typedef void (*wic_on_close_transport_fn)(struct wic_inst *inst);
  * @param[in] type  may be used for prioritisation
  *
  * */
-typedef void (*wic_on_send_fn)(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type);
+typedef void (*wic_on_send_fn)(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type);
 
 /** Get a buffer of a minimum size for transporting a particular
  * frame type.
@@ -265,7 +274,7 @@ typedef void (*wic_on_send_fn)(struct wic_inst *inst, const void *data, size_t s
  * 
  * @param[in] inst
  * @param[in] min_size  buffer should be at least this size
- * @param[in] type      use this information to prioritise
+ * @param[in] type      what the memory is used for
  * @param[in] max_size  size of returned memory
  *
  * @return pointer to memory
@@ -273,7 +282,7 @@ typedef void (*wic_on_send_fn)(struct wic_inst *inst, const void *data, size_t s
  * @retval NULL     no memory available for this min_size and type
  *
  * */
-typedef void *(*wic_on_buffer_fn)(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size);
+typedef void *(*wic_on_buffer_fn)(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size);
 
 /** Called to get a 32bit random number
  *
@@ -321,20 +330,8 @@ struct wic_init_arg {
     /** Maximum size of rx payload and received handshake */
     size_t rx_max;      
 
-    /** Maximum size of sent payload
-     *
-     * Set this to non-zero to ensure that send requests will fail
-     * before calling on_buffer_fn for the reason of being
-     * too large.
-     * 
-     * */
-    size_t tx_max;
-
-    /** **OPTIONAL** handler called when text is received */
-    wic_on_text_fn on_text;
-
-    /** **OPTIONAL** handler called when binary is received */
-    wic_on_binary_fn on_binary;
+    /** **OPTIONAL** handler called when text or binary is received */
+    wic_on_message_fn on_message;
 
     /** **OPTIONAL** handler called when socket becomes open/established */
     wic_on_open_fn on_open;
@@ -491,8 +488,7 @@ struct wic_inst {
 
     struct wic_rx_frame rx;
 
-    wic_on_text_fn on_text;
-    wic_on_binary_fn on_binary;
+    wic_on_message_fn on_message;
     
     wic_on_open_fn on_open;
     wic_on_close_fn on_close;
@@ -628,8 +624,17 @@ enum wic_status wic_start(struct wic_inst *self);
  * @param[in] data
  * @param[in] size      size of data
  *
+ * @return bytes parsed
+ *
+ * This function will parse one wic frame or message at a time. It is the
+ * responsibility of the integrator to track how many bytes have been
+ * consumed, and to call wic_parse again to continue parsing.
+ *
+ * If no bytes are consumed it means that wic_inst is either blocked
+ * (see #wic_on_message_fn) or that wic_inst has entered closed state.
+ *
  * */
-void wic_parse(struct wic_inst *self, const void *data, size_t size);
+size_t wic_parse(struct wic_inst *self, const void *data, size_t size);
 
 /** Normal close (1000)
  *
@@ -669,29 +674,25 @@ void wic_close(struct wic_inst *self);
  * */
 void wic_close_with_reason(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size);
 
-/** Send a binary message
- *
- * @param[in] self
- * @param[in] fin   true if final fragment
- * @param[in] data
- * @param[in] size  size of data
- *
- * @return #wic_status
- *
- * @retval WIC_STATUS_SUCCESS
- * @retval WIC_STATUS_NOT_OPEN
- * @retval WIC_STATUS_WOULD_BLOCK
- * @retval WIC_STATUS_TOO_LARGE
+/**
+ * Equivalent to calling wic_send() with WIC_ENCODING_BINARY encoding.
  *
  * */
 enum wic_status wic_send_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size);
 
-/** Send a text message
+/**
+ * Equivalent to calling wic_send() with WIC_ENCODING_UTF8 encoding.
+ *
+ * */
+enum wic_status wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
+
+/** Send a message with either UTF or binary encoding
  *
  * @param[in] self
- * @param[in] fin   true if final fragment
+ * @param[in] encoding  encoding of data
+ * @param[in] fin       true if final fragment
  * @param[in] data
- * @param[in] size  size of data
+ * @param[in] size      size of data
  *
  * @return #wic_status
  *
@@ -701,7 +702,7 @@ enum wic_status wic_send_binary(struct wic_inst *self, bool fin, const void *dat
  * @retval WIC_STATUS_TOO_LARGE    
  *
  * */
-enum wic_status wic_send_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
+enum wic_status wic_send(struct wic_inst *self, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 
 /** Send a Ping message
  *
@@ -806,15 +807,6 @@ void wic_rewind_get_next_header(struct wic_inst *self);
  *
  * */
 enum wic_state wic_get_state(const struct wic_inst *self);
-
-/** The maximum size of payload
- *
- * @param[in] self
- *
- * @return maximum payload size
- * 
- * */
-size_t wic_get_max_tx(const struct wic_inst *self);
 
 #ifdef __cplusplus
 }

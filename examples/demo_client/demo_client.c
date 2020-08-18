@@ -37,7 +37,6 @@ static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_
 
 int main(int argc, char **argv)
 {
-    bool open;
     int s, redirects = 3;
     static uint8_t rx[1000];
     static char url[1000] = "ws://echo.websocket.org/";
@@ -75,18 +74,23 @@ int main(int argc, char **argv)
 
         (void)wic_set_header(&inst, &user_agent);
 
-        open = transport_open_client(
-            wic_get_url_schema(&inst),
-            wic_get_url_hostname(&inst),
-            wic_get_url_port(&inst),
-            &s
-        );
+        if(
+            transport_open_client(
+                wic_get_url_schema(&inst),
+                wic_get_url_hostname(&inst),
+                wic_get_url_port(&inst),
+                &s
+            )
+        ){
 
-        if(open){
+            if(wic_start(&inst) == WIC_STATUS_SUCCESS){
 
-            (void)wic_start(&inst);
+                while(transport_recv(s, &inst));
+            }
+            else{
 
-            while(transport_recv(s, &inst));
+                transport_close(&s);
+            }
         }
 
         if(wic_get_redirect_url(&inst) && redirects){

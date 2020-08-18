@@ -29,40 +29,20 @@
 #include <time.h>
 
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size);
-static void on_text(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
-static void on_binary(struct wic_inst *inst, bool fin, const void *data, uint16_t size);
+
+static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
+static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
+
 static void on_open(struct wic_inst *inst);
-static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type);
+static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type);
 static uint32_t do_random(struct wic_inst *inst);
-static void on_text_case_count(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
+
 static void on_close_transport(struct wic_inst *inst);
-static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size);
+static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size);
+
+static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *arg);
 
 static int n = 0;
-
-static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *arg)
-{
-    if(!wic_init(inst, arg)){
-
-        ERROR("could not init instance")
-        exit(EXIT_FAILURE);
-    }
-
-    if(
-        transport_open_client(
-            wic_get_url_schema(inst),
-            wic_get_url_hostname(inst),
-            wic_get_url_port(inst),
-            s
-        )
-    ){
-        wic_start(inst);
-
-        while(transport_recv(*s, inst));
-
-        wic_close(inst);
-    }
-}
 
 int main(int argc, char **argv)
 {
@@ -91,13 +71,12 @@ int main(int argc, char **argv)
     arg.url = url;
 
     arg.url = "ws://localhost:9001/getCaseCount?agent=wic";
-    arg.on_text = on_text_case_count;
+    arg.on_message = on_message_case_count;
     
     do_client(&s, &inst, &arg);
 
     arg.url = url;
-    arg.on_text = on_text;
-    arg.on_binary = on_binary;
+    arg.on_message = on_message;
     
     for(tc=1; tc <= n; tc++){
 
@@ -109,9 +88,8 @@ int main(int argc, char **argv)
     }
 
     arg.url = "ws://localhost:9001/updateReports?agent=wic";
-    arg.on_text = NULL;
-    arg.on_binary = NULL;
-
+    arg.on_message = NULL;
+    
     do_client(&s, &inst, &arg);
 
     LOG("exiting...")
@@ -119,36 +97,64 @@ int main(int argc, char **argv)
     exit(EXIT_SUCCESS);
 }
 
+static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *arg)
+{
+    if(!wic_init(inst, arg)){
+
+        ERROR("could not init instance")
+        exit(EXIT_FAILURE);
+    }
+
+    if(
+        transport_open_client(
+            wic_get_url_schema(inst),
+            wic_get_url_hostname(inst),
+            wic_get_url_port(inst),
+            s
+        )
+    ){
+        if(wic_start(inst) == WIC_STATUS_SUCCESS){
+
+            while(transport_recv(*s, inst));
+        }
+        else{
+
+            transport_close(s);
+        }
+    }
+}
+
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size)
 {
     transport_close((int *)wic_get_app(inst));    
 }
 
-static void on_text(struct wic_inst *inst, bool fin, const char *data, uint16_t size)
+static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
-    wic_send_text(inst, fin, data, size);
+   wic_send(inst, encoding, fin, data, size);
+
+   return true;
 }
 
-static void on_text_case_count(struct wic_inst *inst, bool fin, const char *data, uint16_t size)
+static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
+    printf("%.*s\n", size, data);
+
     if(size > 0){
 
         n = atoi(data);
     }
     
     wic_close(inst);
-}
 
-static void on_binary(struct wic_inst *inst, bool fin, const void *data, uint16_t size)
-{
-    wic_send_binary(inst, fin, data, size);
+    return true;
 }
 
 static void on_open(struct wic_inst *inst)
 {
 }
 
-static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type)
+static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
     if(!transport_write(*(int *)wic_get_app(inst), data, size)){
 
@@ -168,14 +174,15 @@ static uint32_t do_random(struct wic_inst *inst)
     return rand();
 }
 
-static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size)
+static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size)
 {
     static uint8_t tx[UINT16_MAX+100UL];
     void *retval = NULL;
 
+    *max_size = sizeof(tx);
+
     if(min_size <= sizeof(tx)){
 
-        *max_size = sizeof(tx);
         retval = tx;
     }
 

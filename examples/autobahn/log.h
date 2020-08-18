@@ -25,6 +25,6 @@
 #include <stdio.h>
 
 #define LOG(...) do{printf("%s: ", __FILE__);printf(__VA_ARGS__);printf("\n");fflush(stdout);}while(0);
-#define ERROR(...) do{fprintf(stderr, "error: ");fprintf(stderr, __VA_ARGS__);fprintf(stderr, "\n");fflush(stderr);}while(0);
+#define ERROR(...) do{printf("%s: ", __FILE__);fprintf(stderr, "error: ");fprintf(stderr, __VA_ARGS__);fprintf(stderr, "\n");fflush(stderr);}while(0);
 
 #endif

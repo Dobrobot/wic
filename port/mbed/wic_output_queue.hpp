@@ -32,11 +32,10 @@ namespace WIC {
 
         public:
 
-            virtual BufferBase *alloc(enum wic_frame_type type, size_t min_size) = 0;
-            virtual void put(BufferBase *buf) = 0;
-            virtual void free(BufferBase *buf) = 0;
-            virtual BufferBase *get() = 0;
-            virtual void clear() = 0;
+            virtual BufferBase *alloc(enum wic_buffer type, size_t min_size, size_t *max) = 0;
+            virtual void put(BufferBase **buf) = 0;
+            virtual void free(BufferBase **buf) = 0;
+            virtual BufferBase *get() = 0;            
     };
 
     template<size_t MAX_SIZE>
@@ -50,26 +49,27 @@ namespace WIC {
             Buffer<127> pong;
 
             EventFlags flags;
-            
-            rtos::Queue<BufferBase, 4> queue;
 
-            BufferBase *type_to_buf(enum wic_frame_type type)
+            /* 4 + poison */
+            rtos::Queue<BufferBase, 5> queue;
+
+            BufferBase *type_to_buf(enum wic_buffer type)
             {
                 BufferBase *retval = nullptr;
 
                 switch(type){
-                case WIC_FRAME_TYPE_HTTP:
-                case WIC_FRAME_TYPE_USER:
+                case WIC_BUFFER_HTTP:
+                case WIC_BUFFER_USER:
                     retval = &user;
                     break;
-                case WIC_FRAME_TYPE_CLOSE:
-                case WIC_FRAME_TYPE_CLOSE_RESPONSE:
+                case WIC_BUFFER_CLOSE:
+                case WIC_BUFFER_CLOSE_RESPONSE:
                     retval = &close;
                     break;
-                case WIC_FRAME_TYPE_PONG:
+                case WIC_BUFFER_PONG:
                     retval = &pong;
                     break;
-                case WIC_FRAME_TYPE_PING:
+                case WIC_BUFFER_PING:
                     retval = &ping;
                     break;
                 }
@@ -86,10 +86,12 @@ namespace WIC {
                 pong(8U, 1U)
             {}
 
-            BufferBase *alloc(enum wic_frame_type type, size_t min_size)
+            BufferBase *alloc(enum wic_buffer type, size_t min_size, size_t *max)
             {
                 BufferBase *retval = nullptr;         
                 BufferBase *buf = type_to_buf(type);
+
+                *max = MAX_SIZE;
 
                 if(min_size == 0U || buf->max >= min_size){
 
@@ -103,54 +105,48 @@ namespace WIC {
                 return retval;
             }
 
-            void put(BufferBase *buf)
+            void put(BufferBase **buf)
             {
-                if(buf->size > 0U){
+                BufferBase *ptr = *buf;
 
-                    queue.put(buf, buf->priority);
+                *buf = nullptr;
+
+                if(ptr){
+                
+                    if(ptr->size > 0U){
+
+                        queue.put(ptr, ptr->priority);
+                    }
+                    else{
+
+                        free(&ptr);
+                    }
                 }
-                else{
-
-                    free(buf);
-                }                
             }
 
-            void free(BufferBase *buf)
+            void free(BufferBase **buf)
             {
-                flags.clear(buf->mask);                                
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+                
+                if(ptr){
+
+                    flags.clear(ptr->mask);
+                }
             }
             
             BufferBase *get()
             {
-                osEvent evt = queue.get();
+                BufferBase *retval = nullptr;
+                osEvent evt = queue.get(0U);
 
-                if (evt.status == osEventMessage) {
+                if(evt.status == osEventMessage){
 
-                    return static_cast<BufferBase *>(evt.value.p);    
+                    retval = static_cast<BufferBase *>(evt.value.p);
                 }
-                else{
 
-                    return nullptr;
-                }
-            }
-
-            void clear()
-            {
-                BufferBase *buf;
-                osEvent evt;
-
-                do{
-
-                    evt = queue.get(0);
-                    
-                    if(evt.status == osEventMessage){
-
-                        buf = static_cast<BufferBase *>(evt.value.p);
-
-                        free(buf);
-                    }
-                }
-                while(evt.status == osEventMessage);                
+                return retval;
             }
     };
 }

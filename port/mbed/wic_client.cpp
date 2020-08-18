@@ -1,5 +1,7 @@
 #include "wic_client.hpp"
 
+#include <assert.h>
+
 using namespace WIC;
 
 /* constructors *******************************************************/
@@ -7,17 +9,17 @@ using namespace WIC;
 ClientBase::ClientBase(NetworkInterface &interface, BufferBase& rx, InputPoolBase& input, OutputQueueBase& output, BufferBase& url) :
     interface(interface),
     rx(rx),
-    input(input),
-    output(output),
+    input_pool(input),
+    output_queue(output),
     url(url),
     tls(&tcp),
     socket(tcp),
     condition(mutex),
     events(100 * EVENTS_EVENT_SIZE)
 {                
-    writer_thread.start(callback(this, &ClientBase::writer_task));
-    reader_thread.start(callback(this, &ClientBase::reader_task));
-    event_thread.start(callback(&events, &EventQueue::dispatch_forever));
+    socket.sigio(callback(this, &ClientBase::do_sigio));
+    worker_thread.start(callback(this, &ClientBase::worker_task));
+    ticker.attach_us(callback(this, &ClientBase::do_tick), 1000000UL);
 }
 
 /* static protected ***************************************************/
@@ -29,28 +31,27 @@ ClientBase::to_obj(struct wic_inst *self)
 }
 
 void
-ClientBase::handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_frame_type type)
+ClientBase::handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_buffer type)
 {
     ClientBase *obj = to_obj(self);
 
     if(obj->tx){
 
         obj->tx->size = size;
-        obj->output.put(obj->tx);
+        obj->output_queue.put(&obj->tx);
     }                
 }
 
 void *
-ClientBase::handle_buffer(struct wic_inst *self, size_t size, enum wic_frame_type type, size_t *max)
+ClientBase::handle_buffer(struct wic_inst *self, size_t size, enum wic_buffer type, size_t *max)
 {
     void *retval = NULL;
     ClientBase *obj = to_obj(self);
 
-    obj->tx = obj->output.alloc(type, size);
+    obj->tx = obj->output_queue.alloc(type, size, max);
 
     if(obj->tx){
 
-        *max = obj->tx->max;
         retval = obj->tx->data;
     }
 
@@ -76,29 +77,22 @@ ClientBase::handle_handshake_failure(struct wic_inst *self, enum wic_handshake_f
     default:
     /* no response within timeout (either socket or message timeout) */
     case WIC_HANDSHAKE_FAILURE_ABNORMAL_1:
-        //obj->job.retval = NSAPI_ERROR_;
+        obj->job.retval = NSAPI_ERROR_CONNECTION_TIMEOUT;
         break;
         
     /* socket closed / transport errored */
     case WIC_HANDSHAKE_FAILURE_ABNORMAL_2:
-        //obj->job.retval = ;
+        obj->job.retval = NSAPI_ERROR_CONNECTION_LOST;
         break;
         
     /* response was not HTTP */
     case WIC_HANDSHAKE_FAILURE_PROTOCOL:
-        //obj->job.retval = ;
+        obj->job.retval = NSAPI_ERROR_UNSUPPORTED;
         break;
-        
-    /* impossible */
-    case WIC_HANDSHAKE_FAILURE_TLS:
-        break;
-        
-    case WIC_HANDSHAKE_FAILURE_IRRELEVANT:
-        break;
-
+    
     /* connection was not upgraded */
     case WIC_HANDSHAKE_FAILURE_UPGRADE:
-        obj->job.retval = NSAPI_ERROR_OK;
+        obj->job.retval = NSAPI_ERROR_UNSUPPORTED;
         break;
     }
 
@@ -125,26 +119,29 @@ ClientBase::handle_open(struct wic_inst *self)
     obj->notify();
 }
 
-void
-ClientBase::handle_text(struct wic_inst *self, bool fin, const char *data, uint16_t size)
+bool
+ClientBase::handle_message(struct wic_inst *self, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
+    bool retval = false;
     ClientBase *obj = to_obj(self);
-    
-    if(obj->on_text_cb){
+    struct Message *ptr = obj->host_mail.alloc();
 
-        obj->on_text_cb(fin, data, size);
-    }    
-}
+    if(ptr){
 
-void
-ClientBase::handle_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size)
-{
-    ClientBase *obj = to_obj(self);
-    
-    if(obj->on_binary_cb){
+        ptr->encoding = encoding;
+        ptr->fin = fin;
 
-        obj->on_binary_cb(fin, data, size);
-    }   
+        assert(sizeof(ptr->data) >= size);
+
+        ptr->size = size;
+        (void)memcpy(ptr->data, data, size);
+
+        obj->host_mail.put(ptr);
+
+        retval = true;
+    }
+
+    return retval;
 }
 
 void
@@ -163,16 +160,36 @@ ClientBase::handle_close(struct wic_inst *self, uint16_t code, const char *reaso
 void
 ClientBase::handle_close_transport(struct wic_inst *self)
 {
-    to_obj(self)->socket.close();
+    /* this ensures that the output queue is flushed */
+    to_obj(self)->output_queue.put(nullptr);        
+}
+
+void
+ClientBase::handle_ping(struct wic_inst *self)
+{
+    //ClientBase *obj = to_obj(self);
+}
+
+void
+ClientBase::handle_pong(struct wic_inst *self)
+{
+    //ClientBase *obj = to_obj(self);
 }
 
 /* protected **********************************************************/
 
 void
-ClientBase::do_parse(BufferBase *buf)
+ClientBase::do_work()
 {
-    wic_parse(&inst, buf->data, buf->size);
-    input.free(buf);
+    work.release();
+}
+
+void
+ClientBase::do_close_socket()
+{
+    socket.close();            
+    job.done = true;
+    notify();
 }
 
 void
@@ -183,10 +200,19 @@ ClientBase::do_open()
 
     struct wic_init_arg init_arg = {0};
 
-    /* already open */
-    if(state == OPEN){
+    if(state != CLOSED){
 
-        job.retval = NSAPI_ERROR_IS_CONNECTED;
+        switch(state){
+        default:
+        case OPENING:
+        case CLOSING:
+            job.retval = NSAPI_ERROR_BUSY;
+            break;
+        case OPEN:
+            job.retval = NSAPI_ERROR_IS_CONNECTED;
+            break;
+        }
+
         job.done = true;
         notify();
         return;
@@ -199,8 +225,7 @@ ClientBase::do_open()
 
     init_arg.on_open = handle_open;
     init_arg.on_close = handle_close;
-    init_arg.on_text = handle_text;
-    init_arg.on_binary = handle_binary;
+    init_arg.on_message = handle_message;
     init_arg.on_close_transport = handle_close_transport;
     init_arg.on_handshake_failure = handle_handshake_failure;
 
@@ -215,8 +240,7 @@ ClientBase::do_open()
     if(!wic_init(&inst, &init_arg)){
 
         job.retval = NSAPI_ERROR_PARAMETER;
-        job.done = true;
-        notify();
+        do_close_socket();
         return;
     }
 
@@ -225,8 +249,7 @@ ClientBase::do_open()
     if(err != NSAPI_ERROR_OK){
         
         job.retval = err;
-        job.done = true;
-        notify();
+        do_close_socket();
         return;
     }
 
@@ -250,58 +273,51 @@ ClientBase::do_open()
 
     if(err != NSAPI_ERROR_OK){
 
-        socket.close();
         job.retval = err;
-        job.done = true;
-        notify();
+        do_close_socket();
         return;
     }
 
-    if(wic_start(&inst) != WIC_STATUS_SUCCESS){
+    socket.set_blocking(false);
 
-        //job.retval = ;
-        job.done = true;
-        notify();
+    job.status = wic_start(&inst);
+
+    if(job.status != WIC_STATUS_SUCCESS){
+
+        job.retval = NSAPI_ERROR_OK;
+        do_close_socket();
         return;
     }
 
-    flags.set(start_reader_flag | start_writer_flag);
+    state = OPENING;
 
-    timeout_id = events.call_in(5000, callback(this, &ClientBase::do_handshake_timeout));        
+    timeout_id = events.call_in(5000, callback(this, &ClientBase::do_handshake_timeout));   
 }
 
 void
 ClientBase::do_close()
 {
-    wic_close(&inst);
-
-    //wait for reader/writer thread to park
-
-    job.done = true;
-    job.retval = NSAPI_ERROR_OK;
-    notify();
+    switch(wic_get_state(&inst)){
+    case WIC_STATE_READY:
+    case WIC_STATE_OPEN:
+        wic_close(&inst);
+        break;
+    case WIC_STATE_INIT:
+    case WIC_STATE_CLOSED:
+    default:
+        job.retval = NSAPI_ERROR_OK;
+        job.done = true;
+        notify();
+        break;
+    }    
 }
 
 void
-ClientBase::do_send_text(bool fin, const char *value, uint16_t size)
+ClientBase::do_send(enum wic_encoding encoding, bool fin, const char *value, uint16_t size)
 {
-    job.status = wic_send_text(&inst, fin, value, size);
+    job.status = wic_send(&inst, encoding, fin, value, size);
     job.done = true;
     notify();
-}
-
-void
-ClientBase::do_send_binary(bool fin, const void *value, uint16_t size)
-{
-    job.status = wic_send_binary(&inst, fin, value, size);
-    job.done = true;
-    notify();
-}
-
-void
-ClientBase::do_transport_error(nsapi_error_t status)
-{
-    wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
 }
 
 void
@@ -311,91 +327,105 @@ ClientBase::do_handshake_timeout()
 }
 
 void
-ClientBase::writer_task()
+ClientBase::worker_task()
 {
-    BufferBase *buf;
     nsapi_size_or_error_t retval;
-    size_t pos;
-    
+    size_t tx_pos = 0U;
+    size_t rx_pos = 0U;
+    BufferBase *_rx = nullptr;
+    BufferBase *_tx = nullptr;
+
     for(;;){
 
-        flags.wait_any(start_writer_flag);
+        work.acquire();
 
-        for(;;){
+        events.dispatch(0);
 
-            buf = output.get();
+        /* try to get an RX buffer */
+        if(!_rx){
 
-            if(buf){
+            _rx = input_pool.alloc();
+            rx_pos = 0U;
+        }
 
-                pos = 0U;
+        /* try to read the socket if there is an RX buffer */
+        if(_rx){
 
-                do{
+            if(_rx->size == 0U){
 
-                    retval = socket.send(&buf->data[pos], buf->size - pos);
+                retval = socket.recv(_rx->data, _rx->max);
 
-                    if(retval >= 0){
+                if(retval > 0){
 
-                        pos += retval;
-                    }
-                }
-                while((retval >= 0) && (pos < buf->size));
-
-                /* if this buffer contains a close, ensure output queue is clear */
-                if(buf->priority == 2){
-
-                    output.free(buf);                    
-                    notify();
-                    socket.close();
-                    break;
+                    _rx->size = retval;
                 }
                 else{
 
-                    output.free(buf);
-                    notify();
-            
-                    if(retval < 0){
-
-                        events.call(callback(this, &ClientBase::do_transport_error), retval);
+                    switch(retval){
+                    case NSAPI_ERROR_WOULD_BLOCK:
+                    case NSAPI_ERROR_NO_SOCKET:
                         break;
+                    default:
+
+                        wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
+                        do_work();                    
+                        input_pool.free(&_rx);
                     }
                 }
             }
         }
 
-        output.clear();
-    }
-}
-
-void
-ClientBase::reader_task()
-{
-    nsapi_size_or_error_t retval;
-    BufferBase *buf;
-    
-    for(;;){
-
-        flags.wait_any(start_reader_flag);
-
-        for(;;){
-
-            buf = input.alloc();
-
-            retval = socket.recv(buf->data, buf->max);
-
-            if(retval < 0){
-
-                events.call(callback(this, &ClientBase::do_transport_error), retval);
-                input.free(buf);    
-                break;
-            }
-            else{
+        /* try to parse the data read from socket */
+        if(_rx && (_rx->size > 0U)){
             
-                buf->size = retval;
-                events.call(callback(this, &ClientBase::do_parse), buf);
+            size_t bytes = wic_parse(&inst, &_rx->data[rx_pos], _rx->size - rx_pos);
+
+            rx_pos += bytes;
+
+            if(rx_pos == _rx->size){
+
+                input_pool.free(&_rx);
             }
         }
 
-        flags.clear(reader_on_flag);
+        /* try to get a TX buffer */
+        if(!_tx){
+
+            _tx = output_queue.get();
+            tx_pos = 0U;
+        }
+
+        /* try to write the TX buffer to the socket */
+        if(_tx){
+
+            retval = socket.send(&_tx->data[tx_pos], _tx->size - tx_pos);
+
+            if(retval >= 0){
+
+                tx_pos += retval;
+
+                if(tx_pos == _tx->size){
+
+                    output_queue.free(&_tx);
+                    notify();
+                }
+            }
+            else{
+
+                switch(retval){
+                case NSAPI_ERROR_WOULD_BLOCK:
+                case NSAPI_ERROR_NO_SOCKET:
+                    break;
+                default:
+
+                    wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
+                    do_work();
+                    output_queue.free(&_tx);
+                    notify();
+                    break;
+                }                    
+            }
+        }    
     }
 }
 
@@ -428,10 +458,11 @@ ClientBase::open(const char *url)
         strcpy((char *)this->url.data, url_ptr);
         
         events.call(callback(this, &ClientBase::do_open));
+        do_work();
 
         while(!job.done){
 
-            condition.wait();
+            wait();
         }
 
         if(
@@ -465,114 +496,101 @@ ClientBase::close()
     job = {0};
 
     events.call(callback(this, &ClientBase::do_close));
+    do_work();
 
     while(!job.done){
 
-        condition.wait();
+        wait();
     }
 
     mutex.unlock();
 }
 
-enum wic_status
-ClientBase::text(const char *value)
+nsapi_size_or_error_t
+ClientBase::send(const char *data, uint16_t size, enum wic_encoding encoding, bool fin)
 {
-    return text(true, value);
-}
+    nsapi_size_or_error_t retval = NSAPI_ERROR_PARAMETER;
 
-enum wic_status
-ClientBase::text(const char *value, uint16_t size)
-{
-    return text(true, value, size);
-}
+    mutex.lock();
 
-enum wic_status
-ClientBase::text(bool fin, const char *value)
-{
-    enum wic_status retval = WIC_STATUS_SUCCESS;
-    int size = strlen(value);
+    for(;;){
 
-    if(size >= 0){
+        job = {0};
 
-        retval = text(fin, value, (uint16_t)size);
+        events.call(callback(this, &ClientBase::do_send), encoding, fin, data, size);
+
+        do_work();
+
+        while(!job.done){
+
+            wait();
+        }
+
+        if(job.status == WIC_STATUS_WOULD_BLOCK){
+
+            wait();
+        }
+        else{
+
+            switch(job.status){
+            case WIC_STATUS_SUCCESS:
+                retval = size;
+                break;
+            default:
+                retval = NSAPI_ERROR_PARAMETER;
+                break;            
+            }
+
+            break;
+        }
     }
+
+    mutex.unlock();
 
     return retval;
 }
 
-enum wic_status
-ClientBase::text(bool fin, const char *value, uint16_t size)
+nsapi_size_or_error_t
+ClientBase::recv(enum wic_encoding& encoding, bool &fin, char *buffer, uint32_t timeout)
 {
-    enum wic_status retval;
+    nsapi_size_or_error_t retval = NSAPI_ERROR_WOULD_BLOCK;
+    struct Message *ptr;
+    osEvent evt;
+
+    evt = host_mail.get(timeout);
+
+    switch(evt.status){
+    case osEventMessage:
+
+        if(evt.value.p == NULL){
+
+            retval = NSAPI_ERROR_NO_SOCKET;
+        }
+        else{
+
+            ptr = static_cast<struct Message *>(evt.value.p);
+
+            encoding = ptr->encoding;
+            fin = ptr->fin;
+            (void)memcpy(buffer, ptr->data, ptr->size);
+            retval = ptr->size;
+
+            host_mail.free(ptr);
+        }
+
+        do_work();
+        break;
     
-    mutex.lock();
-
-    for(;;){
-
-        job = {0};
-
-        events.call(callback(this, &ClientBase::do_send_text), fin, value, size);
-
-        while(!job.done){
-
-            condition.wait();
-        }
-
-        retval = job.status;
-
-        if(job.status == WIC_STATUS_WOULD_BLOCK){
-
-            condition.wait();
-        }
-        else{
-
-            break;
-        }
+    case osEventTimeout:
+        retval = NSAPI_ERROR_WOULD_BLOCK;
+        break;
+    case osOK:
+    case osErrorParameter:
+    default:
+        retval = NSAPI_ERROR_PARAMETER;
+        break;
     }
-     
-    mutex.unlock();
-
-    return retval;
-}
-
-enum wic_status
-ClientBase::binary(const void *value, uint16_t size)
-{
-    return binary(true, value, size);
-}
-
-enum wic_status
-ClientBase::binary(bool fin, const void *value, uint16_t size)
-{
-    enum wic_status retval;
-
-    mutex.lock();
-
-    for(;;){
-
-        job = {0};
-
-        events.call(callback(this, &ClientBase::do_send_binary), fin, value, size);
-
-        while(!job.done){
-
-            condition.wait();
-        }
-
-        retval = job.status;
-
-        if(job.status == WIC_STATUS_WOULD_BLOCK){
-
-            condition.wait();
-        }
-        else{
-
-            break;
-        }
-    }
-
-    mutex.unlock();
-
+    
     return retval;
 }
 
@@ -580,18 +598,6 @@ bool
 ClientBase::is_open()
 {
     return state == OPEN;
-}
-
-void
-ClientBase::on_text(Callback<void(bool,const char *, uint16_t)> handler)
-{
-    on_text_cb = handler;
-}
-
-void
-ClientBase::on_binary(Callback<void(bool,const void *, uint16_t)> handler)
-{
-    on_binary_cb = handler;
 }
 
 void

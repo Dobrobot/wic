@@ -32,7 +32,7 @@ namespace WIC {
         public:
 
             virtual BufferBase *alloc() = 0;
-            virtual void free(BufferBase *buf) = 0;
+            virtual void free(BufferBase **buf) = 0;
     };
 
     template<size_t MAX_SIZE>
@@ -46,12 +46,19 @@ namespace WIC {
 
             BufferBase *alloc()
             {
-                return static_cast<BufferBase *>(new(pool.alloc_for(osWaitForever)) Buffer<MAX_SIZE>);                
+                return static_cast<BufferBase *>(new(pool.alloc()) Buffer<MAX_SIZE>);                
             }
 
-            void free(BufferBase *buf)
+            void free(BufferBase **buf)
             {
-                pool.free(static_cast<Buffer<MAX_SIZE> *>(buf));
+                BufferBase *ptr = *buf;
+
+                *buf = nullptr;
+
+                if(ptr){
+                
+                    pool.free(static_cast<Buffer<MAX_SIZE> *>(ptr));
+                }
             }
             
     };

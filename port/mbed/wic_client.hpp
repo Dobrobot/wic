@@ -38,30 +38,40 @@ namespace WIC {
             enum State {
 
                 CLOSED,
-                OPEN
+                OPENING,
+                OPEN,
+                CLOSING
 
             } state;
-
-            static const uint32_t start_reader_flag = 1U;
-            static const uint32_t start_writer_flag = 2U;
-            static const uint32_t reader_on_flag = 4U;
-            static const uint32_t writer_on_flag = 8U;
 
             NetworkInterface &interface;
 
             BufferBase& rx;            
-            InputPoolBase& input;
-            OutputQueueBase& output;
+            InputPoolBase& input_pool;
+            OutputQueueBase& output_queue;
             BufferBase& url;
+
+            Semaphore work;
+            Ticker ticker;
+
+            struct Message {
+
+                enum wic_encoding encoding;
+                bool fin;
+                char data[1000U];
+                uint16_t size;
+            };
+
+            Mail<struct Message, 2> host_mail;
             
             TCPSocket tcp;
             TLSSocketWrapper tls;
-            Socket &socket;            
+            Socket &socket;
+            
             Mutex mutex;
             ConditionVariable condition;
             EventQueue events;
-            EventFlags flags;
-
+            
             static const uint32_t max_redirects = 3U;
 
             struct Job {
@@ -76,46 +86,57 @@ namespace WIC {
             BufferBase *tx;
             Job job;
 
-            Thread writer_thread;        
-            Thread reader_thread;
-            Thread event_thread;
+            Thread worker_thread;
 
             struct wic_inst inst;
 
-            Callback<void(bool,const char *, uint16_t)> on_text_cb;
-            Callback<void(bool,const void *, uint16_t)> on_binary_cb;
             Callback<void()> on_open_cb;
             Callback<void(uint16_t, const char *, uint16_t)> on_close_cb;
 
             static ClientBase *to_obj(struct wic_inst *self);
-            static void handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_frame_type type);
-            static void *handle_buffer(struct wic_inst *self, size_t size, enum wic_frame_type type, size_t *max);
+
+            static void handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_buffer type);
+            static void *handle_buffer(struct wic_inst *self, size_t size, enum wic_buffer type, size_t *max);
             static uint32_t handle_rand(struct wic_inst *self);
             static void handle_handshake_failure(struct wic_inst *self, enum wic_handshake_failure reason);
             static void handle_open(struct wic_inst *self);
-            static void handle_text(struct wic_inst *self, bool fin, const char *data, uint16_t size);
-            static void handle_binary(struct wic_inst *self, bool fin, const void *data, uint16_t size);
+            static bool handle_message(struct wic_inst *self, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
             static void handle_close(struct wic_inst *self, uint16_t code, const char *reason, uint16_t size);
             static void handle_close_transport(struct wic_inst *self);
+            static void handle_ping(struct wic_inst *self);
+            static void handle_pong(struct wic_inst *self);            
 
             /* these are requested via public methods */
             void do_open();
             void do_close();
-            void do_send_text(bool fin, const char *value, uint16_t size);
-            void do_send_binary(bool fin, const void *value, uint16_t size);
+            void do_send(enum wic_encoding encoding, bool fin, const char *value, uint16_t size);
+            void do_close_socket();
 
-            void do_parse(BufferBase *buf);            
-            void do_transport_error(nsapi_error_t status);
             void do_handshake_timeout();
+            void do_work();
 
-            void writer_task();
-            void reader_task();
+            void do_tick()
+            {
+                do_work();
+            }
+
+            void do_sigio()
+            {
+                do_work();
+            }
+
+            void worker_task();
 
             void notify()
             {
                 mutex.lock();
                 condition.notify_one();
                 mutex.unlock();                
+            }
+
+            void wait()
+            {
+                condition.wait();
             }
 
         public:
@@ -148,26 +169,49 @@ namespace WIC {
             //bool enable_ping(uint32_t interval, uint32_t response_time);
             //bool disable_ping();
 
-            /* send UTF8 text
+            
+            /** receive a websocket frame
              *
-             * these return wic_status since NSAPI is too generic to
-             * distinguish between "too large to send event"
-             *  */
-            enum wic_status text(const char *value);
-            enum wic_status text(const char *value, uint16_t size);
-            enum wic_status text(bool fin, const char *value);
-            enum wic_status text(bool fin, const char *value, uint16_t size);
+             * @param[out] encoding     indicates the encoding of the data (binary or UTF8)
+             * @param[out] fin          true if final fragment
+             * @param[in/out] buffer    user supplied buffer
+             * @param[in] timeout       by default this interface will block until a message is received or the socket closes
+             *
+             * The memory buffer must be at least the size of the largest
+             * possible payload. This will be known by the application
+             * since the Client is parametrised with it.
+             *
+             * @return nsapi_size_or_error_t
+             *
+             * @retval >0                           size of message received
+             * @retval 0                            websocket was closed
+             * @retval NSAPI_ERROR_WOULD_BLOCK      
+             * @retval NSAPI_ERROR_NO_SOCKET        not open
+             * 
+             * */
+            nsapi_size_or_error_t recv(enum wic_encoding& encoding, bool &fin, char *buffer, uint32_t timeout = osWaitForever);
 
-            /* send binary */
-            enum wic_status binary(const void *value, uint16_t size);
-            enum wic_status binary(bool fin, const void *value, uint16_t size);
+            /** send a message
+             *
+             * @param[in] encoding      specify the encoding (default is UTF8)
+             * @param[in] fin           true if final fragment (default is true)
+             * @param[in] data
+             * @param[in] size
+             *
+             * @return nsapi_size_or_error_t
+             *
+             * @retval >= 0 bytes of data send
+             *
+             * @retval NSAPI_ERROR_WOULD_BLOCK      
+             * @retval NSAPI_ERROR_NO_SOCKET        not open
+             * @retval NSAPI_ERROR_PARAMETER        
+             *
+             * */
+            nsapi_size_or_error_t send(const char *data, uint16_t size, enum wic_encoding encoding = WIC_ENCODING_UTF8, bool fin = true);
 
             /* is websocket open? */
             bool is_open();
 
-            /* set callbacks */
-            void on_text(Callback<void(bool,const char *, uint16_t)> handler);            
-            void on_binary(Callback<void(bool,const void *, uint16_t)> handler);
             void on_open(Callback<void()> handler);
             void on_close(Callback<void(uint16_t, const char *, uint16_t)> handler);
 
