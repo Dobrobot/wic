@@ -1,16 +1,18 @@
 MBED WIC Wrapper
 ================
 
-This wrapper makes it a breeze to use WIC on MBED.
+This wrapper makes it easy to use WIC on MBED.
 
-## WICClient
+## WIC::Client<size_t RX_MAX, size_t TX_MAX>
 
-This is a wrapper class for client mode. Features/characteristics include:
+A wrapper for client mode.
 
-- blocking interfaces
-- TCP and TLS modes (determined by URL)
-- responds to socket 'back-pressure'
-- long life object, no need to create/destroy for each connection
+- TX and RX buffer size defined by template
+- blocking interfaces that behave like the regular socket classes
+- TCP or TLS mode determined by URL
+- prioritised output buffer queue
+- no need to create/destroy for each connection
+- subclass of WIC::ClientBase for generic handling of multiple connections
 
 An example:
 
@@ -18,33 +20,45 @@ An example:
 #include "wic_client.hpp"
 #include "EthernetInterface.h"
 
+static EthernetInterface eth;
+static WIC::Client<1000, 1012> client(eth);
+
+void on_text()
+{
+    printf("on_text: %.*s\n", size, data);
+}
+
 int main()
 {
-    static EthernetInterface eth;
+    enum wic_encoding encoding;
+    bool fin;
+    static char buffer[1000];
+    nsapi_size_or_error_t retval;
 
     eth.connect();
 
-    static WICClient<1000, 1008> client(eth);
-
     for(;;){
 
-        if(client.open("ws://echo.websocket.org/")){
+        if(client.open("wss://echo.websocket.org/") == NSAPI_ERROR_OK){
 
-            while(client.is_open()){
+            client.send("hello world!");
 
-                client.text("hello world!");
-                wait_us(5000);
-            }        
+            retval = client.recv(encoding, fin, buffer, 100);
+
+            if((retval > 0) && (encoding == WIC_ENCODING_UTF8)){
+
+                printf("got: %.*s\n", retval, buffer);
+            }
+            
+            client.close();        
         }
-        else{
 
-            wait_us(10000);
-        }
+        ThisThread::sleep_for(10);        
     }
 }
 ~~~
 
-## WICServer
+## WIC::Server
 
 No support for this mode at this time.
 
