@@ -26,11 +26,14 @@
 #include "wic.h"
 #include "TLSSocket.h"
 #include "wic_output_queue.hpp"
-#include "wic_input_pool.hpp"
 #include "wic_buffer.hpp"
-#include "wic_user_queue.hpp"
+#include "wic_input_queue.hpp"
 
 namespace WIC {
+
+    class RXBuffer : public Buffer<500U>
+    {
+    };
 
     class ClientBase {
 
@@ -47,8 +50,8 @@ namespace WIC {
 
             NetworkInterface &interface;
 
-            UserQueueBase& user_queue;            
-            InputPoolBase& rx_pool;
+            rtos::MemoryPool<RXBuffer, 1U> rx_pool;
+            InputQueueBase& input_queue;            
             OutputQueueBase& tx_queue;
             BufferBase& url;
 
@@ -65,7 +68,7 @@ namespace WIC {
             Socket &socket;
             
             Mutex mutex;
-            ConditionVariable condition;
+            Semaphore writers;
             EventQueue events;
             
             static const uint32_t max_redirects = 3U;
@@ -88,7 +91,7 @@ namespace WIC {
 
             Callback<void()> on_open_cb;
             Callback<void(uint16_t, const char *, uint16_t)> on_close_cb;
-
+            
             static ClientBase *to_obj(struct wic_inst *self);
 
             static void handle_send(struct wic_inst *self, const void *data, size_t size, enum wic_buffer type);
@@ -125,19 +128,17 @@ namespace WIC {
 
             void notify()
             {
-                mutex.lock();
-                condition.notify_one();
-                mutex.unlock();                
+                writers.release();
             }
 
             void wait()
             {
-                condition.wait();
+                writers.try_acquire();
             }
 
         public:
 
-            ClientBase(NetworkInterface &interface, UserQueueBase& user_queue, InputPoolBase& rx_pool, OutputQueueBase& tx_queue, BufferBase& url);
+            ClientBase(NetworkInterface &interface, InputQueueBase& input_queue, OutputQueueBase& tx_queue, BufferBase& url);
 
             /** Open the websocket
              *
@@ -170,7 +171,8 @@ namespace WIC {
              *
              * @param[out] encoding     indicates the encoding of the data (binary or UTF8)
              * @param[out] fin          true if final fragment
-             * @param[in/out] buffer    user supplied buffer
+             * @param[out] buffer       buffer to copy into
+             * @param[in] max           max size of buffer
              * @param[in] timeout       by default this interface will block until a message is received or the socket closes
              *
              * The memory buffer must be at least the size of the largest
@@ -185,7 +187,7 @@ namespace WIC {
              * @retval NSAPI_ERROR_NO_SOCKET        not open
              * 
              * */
-            nsapi_size_or_error_t recv(enum wic_encoding& encoding, bool &fin, char *buffer, uint32_t timeout = osWaitForever);
+            nsapi_size_or_error_t recv(enum wic_encoding& encoding, bool &fin, char *buffer, size_t max, uint32_t timeout = osWaitForever);
 
             /** send a message
              *
@@ -208,9 +210,6 @@ namespace WIC {
             /* is websocket open? */
             bool is_open();
 
-            void on_open(Callback<void()> handler);
-            void on_close(Callback<void(uint16_t, const char *, uint16_t)> handler);
-
             /* TLS settings */
             nsapi_error_t set_root_ca_cert(const void *root_ca, size_t len);
             nsapi_error_t set_root_ca_cert(const char *root_ca_pem);
@@ -223,15 +222,14 @@ namespace WIC {
 
         protected:
 
-            UserQueue<RX_MAX, 2U> _user_queue;
+            InputQueue<RX_MAX, 2U> _input_queue;
             OutputQueue<TX_MAX> _tx_queue;
-            InputPool<RX_MAX> _rx_pool;
             Buffer<URL_MAX> _url;
             
         public:
 
             Client(NetworkInterface &interface) :
-                ClientBase(interface, _user_queue, _rx_pool, _tx_queue, _url)
+                ClientBase(interface, _input_queue, _tx_queue, _url)
             {};
     };
 };

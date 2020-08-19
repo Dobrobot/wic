@@ -479,6 +479,7 @@ enum wic_status wic_send_ping_with_payload(struct wic_inst *self, const void *da
 
 size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
 {
+    const uint8_t *ptr;
     size_t bytes = 0U;
     http_parser_settings settings;
 
@@ -487,8 +488,7 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
     case WIC_STATE_INIT:
     case WIC_STATE_READY:
     case WIC_STATE_CLOSED:
-
-        WIC_DEBUG("nothing to parse in this state")
+        bytes = size;
         break;
 
     case WIC_STATE_PARSE_HANDSHAKE:
@@ -524,14 +524,22 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
 
             self->state = WIC_STATE_CLOSED;
         }
-        else{
+        else if(self->state == WIC_STATE_READY){
 
             if(self->on_open != NULL){
 
                 self->on_open(self);
             }
 
-            self->state = WIC_STATE_OPEN;                            
+            self->state = WIC_STATE_OPEN;
+
+            ptr = data;
+            
+            bytes += parse_websocket(self, &ptr[bytes], size - bytes);
+        }        
+        else{
+
+            /* still parsing... */
         }
         break;
 
@@ -539,6 +547,11 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
 
         bytes = parse_websocket(self, data, size);
         break;
+    }
+
+    if(self->state == WIC_STATE_CLOSED){
+
+        bytes = size;
     }
 
     return bytes;
@@ -1218,7 +1231,7 @@ static size_t parse_websocket(struct wic_inst *self, const void *data, size_t si
             break;
         }
     }
-    while(!stream_eof(&s) && (self->state == WIC_STATE_OPEN) && (self->rx.state != WIC_RX_STATE_OPCODE) && !blocked);
+    while(!stream_eof(&s) && (self->state == WIC_STATE_OPEN) && !blocked);
 
     return stream_pos(&s);
 }

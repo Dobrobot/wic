@@ -108,21 +108,39 @@ bool transport_open_client(enum wic_schema schema, const char *host, uint16_t po
 
 bool transport_write(int s, const void *data, size_t size)
 {
-    return (write(s, data, size) == size);
+    const uint8_t *ptr = data;
+    size_t pos;
+    int retval;
+
+    for(pos=0U; pos < size; pos += retval){
+
+        retval = write(s, &ptr[pos], size - pos);
+
+        if(retval <= 0){
+
+            break;
+        }
+    }
+
+    return (pos == size);
 }
 
 bool transport_recv(int s, struct wic_inst *inst)
 {
     static uint8_t buffer[1000U];
     ssize_t bytes;
-    
+    size_t retval, pos;
+
     bytes = recv(s, buffer, sizeof(buffer), 0);
 
     if(bytes > 0){
-        
-        wic_parse(inst, buffer, bytes);
-    }
 
+        for(pos=0U; pos < bytes; pos += retval){
+        
+            retval = wic_parse(inst, &buffer[pos], bytes - pos);
+        }
+    }
+    
     if(bytes < 0){
 
         ERROR("socket error")
@@ -130,7 +148,7 @@ bool transport_recv(int s, struct wic_inst *inst)
 
     if(bytes == 0){
 
-        ERROR("socket closed")
+        ERROR("socket closed")            
     }
 
     return (bytes > 0);

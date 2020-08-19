@@ -49,6 +49,8 @@ namespace WIC {
             BufferBase(uint32_t mask, uint32_t priority)
                 : mask(mask), priority(priority)
             {}
+
+            virtual bool init(const void *data, size_t size, enum wic_encoding encoding = WIC_ENCODING_UTF8, bool fin = true) = 0;
     };
 
     template<size_t MAX_SIZE>
@@ -64,6 +66,7 @@ namespace WIC {
             {
                 data = _data;
                 max = sizeof(_data);
+                size = 0U;
             }
 
             Buffer(uint32_t mask, uint32_t priority)
@@ -71,13 +74,17 @@ namespace WIC {
             {
                 data = _data;
                 max = sizeof(_data);
+                size = 0U;
             }
-            
-            bool init(const void *data, size_t size)
+
+            bool init(const void *data, size_t size, enum wic_encoding encoding = WIC_ENCODING_UTF8, bool fin = true)
             {
                 bool retval = false;
-                
+
                 if(size <= sizeof(_data)){
+
+                    this->encoding = encoding;
+                    this->fin = fin;
 
                     (void)memcpy(_data, data, size);
                     this->size = size;

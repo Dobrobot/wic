@@ -33,10 +33,10 @@ namespace WIC {
         public:
 
             virtual BufferBase *alloc(enum wic_buffer type, size_t min_size, size_t *max) = 0;
-            virtual void free(BufferBase **buf) = 0;
+            virtual void free(BufferBase *buf) = 0;
 
-            virtual void put(BufferBase **buf) = 0;            
-            virtual BufferBase *get() = 0;            
+            virtual osStatus put(BufferBase *buf) = 0;            
+            virtual BufferBase *get(bool& close) = 0;            
     };
 
     template<size_t MAX_SIZE>
@@ -82,7 +82,7 @@ namespace WIC {
 
             OutputQueue() :
                 user(1U, 0U),
-                close(2U, 2U),
+                close(2U, 3U),  // priority 2 is nullptr
                 ping(4U, 0U),
                 pong(8U, 1U)
             {}
@@ -106,45 +106,42 @@ namespace WIC {
                 return retval;
             }
 
-            void put(BufferBase **buf)
+            osStatus put(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
+                osStatus retval;
+        
+                if(buf){
 
-                *buf = nullptr;
-
-                if(ptr){
-                
-                    if(ptr->size > 0U){
-
-                        queue.put(ptr, ptr->priority);
-                    }
-                    else{
-
-                        free(&ptr);
-                    }
+                    retval = queue.put(buf, buf->priority);                    
                 }
+                else{
+
+                    retval = queue.put(buf, 2U);
+                }
+
+                return retval;
             }
 
-            void free(BufferBase **buf)
+            void free(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
+                if(buf){
 
-                *buf = nullptr;
-                
-                if(ptr){
-
-                    flags.clear(ptr->mask);
+                    flags.clear(buf->mask);
                 }
             }
             
-            BufferBase *get()
+            BufferBase *get(bool& close)
             {
                 BufferBase *retval = nullptr;
                 osEvent evt = queue.get(0U);
 
+                close = false;
+
                 if(evt.status == osEventMessage){
 
                     retval = static_cast<BufferBase *>(evt.value.p);
+
+                    close = retval ? false : true;
                 }
 
                 return retval;

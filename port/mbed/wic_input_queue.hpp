@@ -27,19 +27,19 @@
 
 namespace WIC {
 
-    class UserQueueBase {
+    class InputQueueBase {
 
         public:
 
             virtual BufferBase *alloc() = 0;
-            virtual void free(BufferBase **buf) = 0;
+            virtual void free(BufferBase *buf) = 0;
 
-            virtual void put(BufferBase **buf) = 0;            
+            virtual osStatus put(BufferBase *buf) = 0;            
             virtual osEvent get(uint32_t timeout) = 0;         
     };
 
     template<size_t SIZE, size_t DEPTH>
-    class UserQueue : public UserQueueBase {
+    class InputQueue : public InputQueueBase {
 
         protected:
 
@@ -49,19 +49,12 @@ namespace WIC {
 
             BufferBase *alloc()
             {
-                return static_cast<BufferBase *>(mail.alloc());
+                return static_cast<BufferBase *>(new(mail.alloc()) Buffer<SIZE>);                 
             }
 
-            void free(BufferBase **buf)
+            void free(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
-
-                *buf = nullptr;
-
-                if(ptr){
-                
-                    mail.free(static_cast<Buffer<SIZE> *>(ptr));
-                }
+                mail.free(static_cast<Buffer<SIZE> *>(buf));
             }
 
             osEvent get(uint32_t timeout)
@@ -69,16 +62,9 @@ namespace WIC {
                 return mail.get(timeout);                
             }
 
-            void put(BufferBase **buf)
+            osStatus put(BufferBase *buf)
             {
-                BufferBase *ptr = *buf;
-
-                *buf = nullptr;
-
-                if(ptr){
-
-                    mail.put(static_cast<Buffer<SIZE> *>(ptr));
-                }
+                return mail.put(static_cast<Buffer<SIZE> *>(buf));                
             }
             
     };

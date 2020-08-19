@@ -22,53 +22,107 @@
 #include "wic_client.hpp"
 #include "EthernetInterface.h"
 
+Mutex mutex;
+
 #define PUTS(...) do{\
+    mutex.lock();\
     printf(__VA_ARGS__);\
     printf("\n");\
     fflush(stdout);\
+    mutex.unlock();\
 }while(0);
+
+int i;
     
-
-void on_text(bool fin, const char *value, uint16_t size)
-{
-    PUTS("got text: %.*s", size, value);
-}
-
-void on_binary(bool fin, const void *value, uint16_t size)
-{
-    PUTS("got binary: <not shown>");
-}
-
-void on_open(void)
-{
-    PUTS("websocket is open!");
-}
-
-void on_close(uint16_t code, const char *reason, uint16_t size)
-{
-    PUTS("websocket closed (%u)", code);
-}
-
 int main()
 {
-    //printf("starting!\n");
-
     static EthernetInterface eth;
-
-    eth.connect();
-
     static WIC::Client<1000,1012> client(eth);
 
-    client.on_text(callback(on_text));
-    client.on_binary(callback(on_binary));
-    client.on_open(callback(on_open));
-    client.on_close(callback(on_close));
+    enum wic_encoding encoding;
+    bool fin;
+    static char buffer[1000];
+    nsapi_size_or_error_t retval;
+    nsapi_size_or_error_t bytes;
 
-    client.open("ws://192.168.1.108:9001/getCaseCount");
+    int n;
+    
+    eth.connect();
 
-    for(int i=0;;i++){
+    for(int i=0; true; i++){
 
-        //printf("hey %d\n", i);
+        client.open("ws://192.168.1.108:9001/getCaseCount?agent=mbed");
+
+        retval = client.recv(encoding, fin, buffer, sizeof(buffer));
+
+        if(retval >= 0){
+
+            buffer[retval] = 0;
+            n = atoi(buffer);
+            PUTS("getCaseCount: %d (#%d)", n, i);
+        }
+        else{
+
+            PUTS("it errored %d (#$d)", retval, i);
+        }
+
+        client.close();
+
+        wait_us(500000);
+    }
+
+    for(int tc=1U; tc <= n; tc++){
+
+        const char url_base[] = "ws://192.168.1.108:9001/";
+        char url[100];
+        snprintf(url, sizeof(url), "%srunCase?case=%d&agent=mbed", url_base, tc);
+
+        retval = client.open(url);
+
+        if(retval == NSAPI_ERROR_OK){
+
+            for(;;){
+
+                retval = client.recv(encoding, fin, buffer, sizeof(buffer));
+
+                if(retval >= 0){
+
+                    if(encoding == WIC_ENCODING_UTF8){
+
+                        PUTS("got text: %.*s", retval, buffer);
+                    }
+
+                    bytes = retval;
+
+                    retval = client.send(buffer, bytes, encoding, fin);
+
+                    if(retval != bytes){
+
+                        PUTS("error #send() @ %d retval %d", tc, retval);
+                        break;
+                    }
+                }
+                else{
+
+                    PUTS("error #recv() @ %d retval %d", tc, retval);
+                    break;
+                }
+            }
+
+            client.close();    
+        }
+        else{
+
+            PUTS("error #open() @ %d retval %d", tc, retval);
+            break;
+        }
+    }
+
+    client.open("ws://192.168.1.108:9001/updateReports?agent=mbed");
+    client.close();
+
+    for(;;){
+
         wait_us(2000000);
     }
 }
