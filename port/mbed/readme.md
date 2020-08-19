@@ -23,11 +23,6 @@ An example:
 static EthernetInterface eth;
 static WIC::Client<1000, 1012> client(eth);
 
-void on_text()
-{
-    printf("on_text: %.*s\n", size, data);
-}
-
 int main()
 {
     enum wic_encoding encoding;
@@ -45,7 +40,7 @@ int main()
 
             retval = client.recv(encoding, fin, buffer, 100);
 
-            if((retval > 0) && (encoding == WIC_ENCODING_UTF8)){
+            if((retval >= 0) && (encoding == WIC_ENCODING_UTF8)){
 
                 printf("got: %.*s\n", retval, buffer);
             }
@@ -53,7 +48,7 @@ int main()
             client.close();        
         }
 
-        ThisThread::sleep_for(10);        
+        wait_us(5000000);        
     }
 }
 ~~~
