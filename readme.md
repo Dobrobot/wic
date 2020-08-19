@@ -38,6 +38,10 @@ fields in the same buffer as used for receiving websocket frames. Applications
 that require header fields to persist beyond WIC_STATE_READY will need
 to copy the fields when they are available.
 
+## Integrations
+
+- [mbed wrapper](port/mbed)
+
 ## Compiling
 
 - add `include` to the search path
@@ -65,7 +69,6 @@ int main(int argc, char **argv)
 {
     int s;
     static uint8_t rx[1000];
-    static char url[1000] = "ws://echo.websocket.org/";
     struct wic_inst inst;
     struct wic_init_arg arg = {0};
 
@@ -77,7 +80,7 @@ int main(int argc, char **argv)
     arg.on_buffer = on_buffer_handler;        
 
     arg.app = &s;
-    arg.url = url;
+    arg.url = "ws://echo.websocket.org/";
     arg.role = WIC_ROLE_CLIENT;
 
     if(!wic_init(&inst, &arg)){
@@ -88,9 +91,14 @@ int main(int argc, char **argv)
     if(transport_open_client(wic_get_url_schema(&inst),
             wic_get_url_hostname(&inst), wic_get_url_port(&inst), &s)){
 
-        (void)wic_start(&inst);
+        if(wic_start(&inst) == WIC_STATUS_SUCCESS){
 
-        while(transport_recv(s, &inst));
+            while(transport_recv(s, &inst));
+        }
+        else{
+
+            transport_close(&s);
+        }
     }
     
     exit(EXIT_SUCCESS);
