@@ -10,9 +10,7 @@ A wrapper for client mode.
 - TX and RX buffer size defined by template
 - blocking interfaces that behave like the regular socket classes
 - TCP or TLS mode determined by URL
-- prioritised output buffer queue
 - no need to create/destroy for each connection
-- subclass of WIC::ClientBase for generic handling of multiple connections
 
 An example:
 
