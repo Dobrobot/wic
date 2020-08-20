@@ -121,10 +121,7 @@ static void on_close_transport_handler(struct wic_inst *inst)
 static void on_send_handler(struct wic_inst *inst, const void *data,
         size_t size, enum wic_frame_type type)
 {
-    if(!transport_write(*(int *)wic_get_app(inst), data, size)){
-
-        wic_close_with_reason(inst, WIC_CLOSE_ABNORMAL_1, NULL, 0U);
-    }
+    transport_write(*(int *)wic_get_app(inst), data, size);
 }
 
 static void *on_buffer_handler(struct wic_inst *inst, size_t min_size,

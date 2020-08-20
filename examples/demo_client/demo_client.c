@@ -119,15 +119,15 @@ static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding
 
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason)
 {
-    printf("something went wrong during the handshake\n");
+    printf("websocket handshake failed for reason %d\n", reason);
 }
 
 static void on_open_handler(struct wic_inst *inst)
 {
     const char *name, *value;
 
-    printf("websocket is not open\n");
-
+    printf("websocket is open\n");
+    
     printf("received handshake:\n");
 
     for(value = wic_get_next_header(inst, &name); value; value = wic_get_next_header(inst, &name)){
@@ -155,10 +155,9 @@ static void on_close_transport_handler(struct wic_inst *inst)
 
 static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
-    if(!transport_write(*(int *)wic_get_app(inst), data, size)){
+    printf("sending buffer type %d\n", type);
 
-        wic_close_with_reason(inst, WIC_CLOSE_ABNORMAL_1, NULL, 0U);
-    }
+    transport_write(*(int *)wic_get_app(inst), data, size);
 }
 
 static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size)

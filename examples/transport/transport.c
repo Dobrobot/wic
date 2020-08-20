@@ -106,7 +106,7 @@ bool transport_open_client(enum wic_schema schema, const char *host, uint16_t po
     return retval;
 }
 
-bool transport_write(int s, const void *data, size_t size)
+void transport_write(int s, const void *data, size_t size)
 {
     const uint8_t *ptr = data;
     size_t pos;
@@ -121,8 +121,6 @@ bool transport_write(int s, const void *data, size_t size)
             break;
         }
     }
-
-    return (pos == size);
 }
 
 bool transport_recv(int s, struct wic_inst *inst)
@@ -141,14 +139,9 @@ bool transport_recv(int s, struct wic_inst *inst)
         }
     }
     
-    if(bytes < 0){
+    if(bytes <= 0){
 
-        ERROR("socket error")
-    }
-
-    if(bytes == 0){
-
-        ERROR("socket closed")            
+        wic_close_with_reason(inst, WIC_CLOSE_ABNORMAL_2, NULL, 0);
     }
 
     return (bytes > 0);

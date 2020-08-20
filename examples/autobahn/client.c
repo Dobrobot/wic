@@ -30,6 +30,8 @@
 
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size);
 
+static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason);
+
 static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 
@@ -65,6 +67,7 @@ int main(int argc, char **argv)
     arg.on_send = on_send;
     arg.on_buffer = on_buffer;
     arg.on_close_transport = on_close_transport;
+    arg.on_handshake_failure = on_handshake_failure_handler;
     arg.rand = do_random;
     arg.app = &s;
     arg.role = WIC_ROLE_CLIENT;
@@ -97,6 +100,11 @@ int main(int argc, char **argv)
     exit(EXIT_SUCCESS);
 }
 
+static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason)
+{
+    printf("websocket handshake failed for reason %d\n", reason);
+}
+
 static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *arg)
 {
     if(!wic_init(inst, arg)){
@@ -126,14 +134,16 @@ static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *
 
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size)
 {
-    transport_close((int *)wic_get_app(inst));    
+    printf("websocket closed for reason %u %.*s\n", code, size, reason);
 }
 
 static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
-   wic_send(inst, encoding, fin, data, size);
+    printf("received %u bytes of %s %s\n", size, (encoding == WIC_ENCODING_UTF8) ? "text" : "binary", fin ? "(final)" : "");
 
-   return true;
+    wic_send(inst, encoding, fin, data, size);
+
+    return true;
 }
 
 static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
@@ -152,16 +162,14 @@ static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encod
 
 static void on_open(struct wic_inst *inst)
 {
+    printf("websocket is open\n");
 }
 
 static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
-    if(!transport_write(*(int *)wic_get_app(inst), data, size)){
+    printf("sending buffer type %d\n", type);
 
-        ERROR("transport_write()")
-
-        wic_close_with_reason(inst, WIC_CLOSE_ABNORMAL_1, NULL, 0U);
-    }
+    transport_write(*(int *)wic_get_app(inst), data, size);
 }
 
 static void on_close_transport(struct wic_inst *inst)
@@ -177,14 +185,8 @@ static uint32_t do_random(struct wic_inst *inst)
 static void *on_buffer(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size)
 {
     static uint8_t tx[UINT16_MAX+100UL];
-    void *retval = NULL;
-
+    
     *max_size = sizeof(tx);
 
-    if(min_size <= sizeof(tx)){
-
-        retval = tx;
-    }
-
-    return retval;
+    return (min_size <= sizeof(tx)) ? tx : NULL;
 }
