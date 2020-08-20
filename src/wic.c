@@ -534,7 +534,7 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
             self->state = WIC_STATE_OPEN;
 
             ptr = data;
-            
+
             bytes += parse_websocket(self, &ptr[bytes], size - bytes);
         }        
         else{
@@ -1033,7 +1033,11 @@ static size_t parse_websocket(struct wic_inst *self, const void *data, size_t si
             }        
             break;
 
-        case WIC_RX_STATE_DATA:
+        default:
+            break;
+        }
+
+        if(self->rx.state == WIC_RX_STATE_DATA){
 
             /* if still receiving data part */
             if(self->rx.size > 0U){
@@ -1225,10 +1229,6 @@ static size_t parse_websocket(struct wic_inst *self, const void *data, size_t si
                     self->rx.state = WIC_RX_STATE_OPCODE;
                 }                
             }
-            break;
-
-        default:
-            break;
         }
     }
     while(!stream_eof(&s) && (self->state == WIC_STATE_OPEN) && !blocked);
