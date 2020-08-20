@@ -86,7 +86,7 @@ namespace WIC {
                     this->encoding = encoding;
                     this->fin = fin;
 
-                    (void)memcpy(_data, data, size);
+                    (void)memcpy(this->data, data, size);
                     this->size = size;
 
                     retval = true;

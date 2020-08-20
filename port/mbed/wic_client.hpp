@@ -67,9 +67,12 @@ namespace WIC {
             TLSSocketWrapper tls;
             Socket &socket;
             
-            Mutex mutex;
+            Mutex writers_mutex;
             Semaphore writers;
             EventQueue events;
+
+            Mutex readers_mutex;
+            ConditionVariable readers;
             
             static const uint32_t max_redirects = 3U;
 
@@ -114,6 +117,8 @@ namespace WIC {
             void do_handshake_timeout();
             void do_work();
 
+            bool try_get(nsapi_size_or_error_t &retval, enum wic_encoding& encoding, bool &fin, char *buffer, size_t max);
+
             void do_tick()
             {
                 do_work();
@@ -126,9 +131,30 @@ namespace WIC {
 
             void worker_task();
 
-            void notify()
+            void notify_writers()
             {
                 writers.release();
+            }
+
+            void notify_readers()
+            {
+                readers_mutex.lock();
+                readers.notify_all();
+                readers_mutex.unlock();
+            }
+
+            void flush_output_queue()
+            {
+                osEvent evt;
+                
+                readers_mutex.lock();
+                
+                for(evt = input_queue.get(0); evt.status == osEventMail; evt = input_queue.get(0)){
+
+                    input_queue.free(static_cast<BufferBase *>(evt.value.p));
+                }
+                
+                readers_mutex.unlock();
             }
 
             void wait()
@@ -140,7 +166,7 @@ namespace WIC {
 
             ClientBase(NetworkInterface &interface, InputQueueBase& input_queue, OutputQueueBase& tx_queue, BufferBase& url);
 
-            /** Open the websocket
+            /** Connect the websocket
              *
              * @param[in] url
              *
@@ -155,9 +181,9 @@ namespace WIC {
              * @retval NSAPI_ERROR_CONNECTION_TIMEOUT   socket timeout
              *
              * */
-            nsapi_error_t open(const char *url);
+            nsapi_error_t connect(const char *url);
 
-            /* close an open websocket */
+            /** close the connection */
             void close();
 
             //bool set_header(String key, String value);
@@ -206,6 +232,22 @@ namespace WIC {
              *
              * */
             nsapi_size_or_error_t send(const char *data, uint16_t size, enum wic_encoding encoding = WIC_ENCODING_UTF8, bool fin = true);
+
+            /** send a null-terminated UTF8 string as a message
+             *
+             * @param[in] data
+             * @param[in] fin       true if final fragment (default is true)
+             *
+             * @retval >= 0 bytes of data send
+             *
+             * @retval NSAPI_ERROR_WOULD_BLOCK      
+             * @retval NSAPI_ERROR_NO_SOCKET        not open
+             * 
+             * */
+            nsapi_size_or_error_t send(const char *data, bool fin = true)
+            {
+                return send(data, strlen(data), WIC_ENCODING_UTF8, fin);
+            }
 
             /* is websocket open? */
             bool is_open();

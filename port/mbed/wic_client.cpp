@@ -4,6 +4,8 @@
 
 using namespace WIC;
 
+uint32_t time_since();
+
 /* constructors *******************************************************/
 
 ClientBase::ClientBase(NetworkInterface &interface, InputQueueBase& input_queue, OutputQueueBase& tx_queue, BufferBase& url) :
@@ -14,7 +16,8 @@ ClientBase::ClientBase(NetworkInterface &interface, InputQueueBase& input_queue,
     tls(&tcp),
     socket(tcp),
     writers(0, 1),
-    events(100 * EVENTS_EVENT_SIZE)
+    events(100 * EVENTS_EVENT_SIZE),
+    readers(readers_mutex)
 {                
     socket.sigio(callback(this, &ClientBase::do_sigio));
     worker_thread.start(callback(this, &ClientBase::worker_task));
@@ -107,7 +110,7 @@ ClientBase::handle_handshake_failure(struct wic_inst *self, enum wic_handshake_f
     }
 
     obj->job.done = true;
-    obj->notify();
+    obj->notify_writers();
 
     obj->state = CLOSING;
 }
@@ -123,7 +126,7 @@ ClientBase::handle_open(struct wic_inst *self)
     
     obj->job.retval = NSAPI_ERROR_OK;
     obj->job.done = true;
-    obj->notify();
+    obj->notify_writers();
 }
 
 bool
@@ -132,7 +135,7 @@ ClientBase::handle_message(struct wic_inst *self, enum wic_encoding encoding, bo
     bool retval = false;
     ClientBase *obj = to_obj(self);
     BufferBase *ptr = obj->input_queue.alloc();
-    
+
     if(ptr){
 
         ptr->init(data, size, encoding, fin);
@@ -141,6 +144,8 @@ ClientBase::handle_message(struct wic_inst *self, enum wic_encoding encoding, bo
 
         retval = true;
     }
+
+    obj->notify_readers();
 
     return retval;
 }
@@ -187,7 +192,8 @@ ClientBase::do_close_socket()
     socket.close();            
     job.done = true;
     state = CLOSED;
-    notify();    
+    notify_readers();    
+    notify_writers();    
 }
 
 void
@@ -217,9 +223,11 @@ ClientBase::do_open()
         }
 
         job.done = true;
-        notify();
+        notify_writers();
         return;
     }
+
+    flush_output_queue();
 
     init_arg.app = this;
     
@@ -310,7 +318,7 @@ ClientBase::do_close()
     default:
         job.retval = NSAPI_ERROR_OK;
         job.done = true;
-        notify();
+        notify_writers();
         break;
     }    
 }
@@ -320,7 +328,7 @@ ClientBase::do_send(enum wic_encoding encoding, bool fin, const char *value, uin
 {
     job.status = wic_send(&inst, encoding, fin, value, size);
     job.done = true;
-    notify();
+    notify_writers();
 }
 
 void
@@ -384,7 +392,7 @@ ClientBase::worker_task()
 
         /* try to parse the data read from socket */
         if(_rx && (_rx->size > 0U)){
-            
+
             size_t bytes = wic_parse(&inst, &_rx->data[rx_pos], _rx->size - rx_pos);
 
             rx_pos += bytes;
@@ -424,7 +432,7 @@ ClientBase::worker_task()
 
                     tx_queue.free(_tx);
                     _tx = nullptr;
-                    notify();
+                    notify_writers();
                 }
             }
             else{
@@ -438,7 +446,7 @@ ClientBase::worker_task()
                     //do_work();
                     tx_queue.free(_tx);
                     _tx = nullptr;
-                    notify();
+                    notify_writers();
                     break;
                 }                    
             }
@@ -449,13 +457,13 @@ ClientBase::worker_task()
 /* public *************************************************************/
 
 nsapi_error_t
-ClientBase::open(const char *url)
+ClientBase::connect(const char *url)
 {
     uint32_t n = max_redirects;
     nsapi_error_t retval = NSAPI_ERROR_PARAMETER;
     const char *url_ptr = url;
 
-    mutex.lock();
+    writers_mutex.lock();
 
     for(;;){
 
@@ -500,7 +508,7 @@ ClientBase::open(const char *url)
         }
     }
 
-    mutex.unlock();
+    writers_mutex.unlock();
     
     return retval;
 }
@@ -508,7 +516,7 @@ ClientBase::open(const char *url)
 void
 ClientBase::close()
 {
-    mutex.lock();
+    writers_mutex.lock();
 
     job = {0};
 
@@ -520,7 +528,7 @@ ClientBase::close()
         wait();
     }
 
-    mutex.unlock();
+    writers_mutex.unlock();
 }
 
 nsapi_size_or_error_t
@@ -528,7 +536,7 @@ ClientBase::send(const char *data, uint16_t size, enum wic_encoding encoding, bo
 {
     nsapi_size_or_error_t retval = NSAPI_ERROR_PARAMETER;
 
-    mutex.lock();
+    writers_mutex.lock();
 
     for(;;){
 
@@ -562,51 +570,87 @@ ClientBase::send(const char *data, uint16_t size, enum wic_encoding encoding, bo
         }
     }
 
-    mutex.unlock();
+    writers_mutex.unlock();
 
     return retval;
 }
 
+bool
+ClientBase::try_get(nsapi_size_or_error_t &retval, enum wic_encoding& encoding, bool &fin, char *buffer, size_t max)
+{
+    bool success = false;
+    osEvent evt;
+    BufferBase *ptr;    
+
+    evt = input_queue.get(0);
+
+    if(evt.status == osEventMail){
+
+        ptr = static_cast<BufferBase *>(evt.value.p);
+
+        encoding = ptr->encoding;
+        fin = ptr->fin;
+        retval = (ptr->size > max) ? max : ptr->size;
+        (void)memcpy(buffer, ptr->data, retval);
+        
+        input_queue.free(ptr);
+        do_work();
+
+        success = true;                
+    }
+    else{
+
+        retval = NSAPI_ERROR_WOULD_BLOCK;
+    }
+
+    return success;
+}
+
+
 nsapi_size_or_error_t
 ClientBase::recv(enum wic_encoding& encoding, bool &fin, char *buffer, size_t max, uint32_t timeout)
 {
-    nsapi_size_or_error_t retval = NSAPI_ERROR_WOULD_BLOCK;
-    BufferBase *ptr;
-    osEvent evt;
+    nsapi_size_or_error_t retval;    
+    uint64_t until = 0;
 
-    evt = input_queue.get(timeout);
+    readers_mutex.lock();
 
-    switch(evt.status){
-    case osEventMail:
+    if(timeout != osWaitForever){
 
-        if(evt.value.p == NULL){
+        until = Kernel::get_ms_count() + timeout;
+    }
 
-            retval = NSAPI_ERROR_NO_SOCKET;
+    for(;;){
+
+        if(try_get(retval, encoding, fin, buffer, max)){
+
+            break;
         }
         else{
 
-            ptr = static_cast<BufferBase *>(evt.value.p);
+            if(state == CLOSED){
 
-            encoding = ptr->encoding;
-            fin = ptr->fin;
-            retval = (ptr->size > max) ? max : ptr->size;
-            (void)memcpy(buffer, ptr->data, retval);
-            
-            input_queue.free(ptr);
+                retval = NSAPI_ERROR_NO_CONNECTION;
+                break;
+            }
+        
+            if(timeout == osWaitForever){
+
+                readers.wait();
+            }
+            else if(readers.wait_until(until)){
+
+                retval = (state == OPEN) ? NSAPI_ERROR_WOULD_BLOCK : NSAPI_ERROR_NO_CONNECTION;
+                break;                
+            }
+            else{
+
+                //go around
+            }
         }
-
-        do_work();
-        break;
-    
-    case osEventTimeout:
-        retval = NSAPI_ERROR_WOULD_BLOCK;
-        break;
-    case osOK:
-    case osErrorParameter:
-    default:
-        retval = NSAPI_ERROR_PARAMETER;
-        break;
     }
+
+    readers_mutex.unlock();
     
     return retval;
 }
