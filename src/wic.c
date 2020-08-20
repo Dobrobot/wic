@@ -78,7 +78,11 @@ static void close_with_reason(struct wic_inst *self, uint16_t code, const char *
 
 static bool allowed_to_send(struct wic_inst *self);
 
-static size_t parse_websocket(struct wic_inst *self, const void *data, size_t size);
+static bool parse_opcode(struct wic_inst *self, struct wic_stream *s);
+static bool parse_size(struct wic_inst *self, struct wic_stream *s);
+static bool parse_extended_size(struct wic_inst *self, struct wic_stream *s);
+static bool parse_mask(struct wic_inst *self, struct wic_stream *s);
+static bool parse_data(struct wic_inst *self, struct wic_stream *s);
 
 static enum wic_status start_client(struct wic_inst *self);
 static enum wic_status start_server(struct wic_inst *self);
@@ -102,6 +106,7 @@ static bool stream_error(struct wic_stream *self);
 static bool stream_put_str(struct wic_stream *self, const char *str);
 static size_t stream_max(const struct wic_stream *self);
 static size_t stream_pos(const struct wic_stream *self);
+static bool stream_seek(struct wic_stream *self, size_t offset);
 
 static bool str_equal(const char *s1, const char *s2);
 
@@ -479,20 +484,15 @@ enum wic_status wic_send_ping_with_payload(struct wic_inst *self, const void *da
 
 size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
 {
-    const uint8_t *ptr;
-    size_t bytes = 0U;
+    size_t bytes;
     http_parser_settings settings;
+    struct wic_stream s;
+    bool blocked = false;
 
-    switch(self->state){
-    default:
-    case WIC_STATE_INIT:
-    case WIC_STATE_READY:
-    case WIC_STATE_CLOSED:
-        bytes = size;
-        break;
+    stream_init_ro(&s, data, size);            
 
-    case WIC_STATE_PARSE_HANDSHAKE:
-
+    if(self->state == WIC_STATE_PARSE_HANDSHAKE){
+    
         http_parser_settings_init(&settings);
 
         settings.on_header_field = on_header_field;
@@ -500,6 +500,8 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
         settings.on_message_complete = (self->role == WIC_ROLE_CLIENT) ? on_response_complete : on_request_complete;
         
         bytes = http_parser_execute(&self->http, &settings, (char *)data, size);
+
+        (void)stream_seek(&s, bytes);
 
         if(self->http.http_errno != 0U){
 
@@ -532,29 +534,70 @@ size_t wic_parse(struct wic_inst *self, const void *data, size_t size)
             }
 
             self->state = WIC_STATE_OPEN;
-
-            ptr = data;
-
-            bytes += parse_websocket(self, &ptr[bytes], size - bytes);
         }        
         else{
 
             /* still parsing... */
         }
-        break;
-
-    case WIC_STATE_OPEN:
-
-        bytes = parse_websocket(self, data, size);
-        break;
     }
 
-    if(self->state == WIC_STATE_CLOSED){
+    /* parse websocket */
+    if(self->state == WIC_STATE_OPEN){
 
-        bytes = size;
+        do{
+            switch(self->rx.state){
+            case WIC_RX_STATE_OPCODE:
+
+                blocked = parse_opcode(self, &s);
+                break;
+
+            case WIC_RX_STATE_SIZE:
+
+                blocked = parse_size(self, &s);
+                break;
+
+            case WIC_RX_STATE_SIZE_0:
+            case WIC_RX_STATE_SIZE_1:
+            case WIC_RX_STATE_SIZE_2:
+            case WIC_RX_STATE_SIZE_3:
+            case WIC_RX_STATE_SIZE_4:
+            case WIC_RX_STATE_SIZE_5:
+            case WIC_RX_STATE_SIZE_6:
+            case WIC_RX_STATE_SIZE_7:
+            case WIC_RX_STATE_SIZE_8:
+            case WIC_RX_STATE_SIZE_9:
+
+                blocked = parse_extended_size(self, &s);
+                break;
+            
+            case WIC_RX_STATE_MASK_0:
+            case WIC_RX_STATE_MASK_1:
+            case WIC_RX_STATE_MASK_2:
+            case WIC_RX_STATE_MASK_3:
+
+                blocked = parse_mask(self, &s);
+                break;
+
+            default:
+                break;
+            }
+
+            switch(self->rx.state){
+            case WIC_RX_STATE_DATA:
+
+                blocked = parse_data(self, &s);
+                break;
+
+            default:
+                break;
+            }
+        }
+        while(!blocked && (self->state == WIC_STATE_OPEN));
     }
 
-    return bytes;
+    /* consume all bytes if not open
+     * to clear buffers and so on */
+    return (self->state == WIC_STATE_OPEN) ? stream_pos(&s) : size;    
 }
 
 void *wic_get_app(struct wic_inst *self)
@@ -808,432 +851,445 @@ static bool allowed_to_send(struct wic_inst *self)
     return (self->state == WIC_STATE_OPEN);
 }
 
-static size_t parse_websocket(struct wic_inst *self, const void *data, size_t size)
+static bool parse_opcode(struct wic_inst *self, struct wic_stream *s)
 {
     uint8_t b;
-    uint16_t code;
-    struct wic_stream s;
     bool blocked = false;
+    
+    if(stream_get_u8(s, &b)){
 
-    stream_init_ro(&s, data, size);
+        stream_rewind(&self->rx.s);
 
-    do{
+        self->rx.fin = ((b & 0x80U) != 0U);
+        self->rx.rsv1 = ((b & 0x40U) != 0U);
+        self->rx.rsv2 = ((b & 0x20U) != 0U);
+        self->rx.rsv3 = ((b & 0x10U) != 0U);
 
-        switch(self->rx.state){
-        case WIC_RX_STATE_OPCODE:
+        self->rx.utf8 = 0U;
 
-            if(stream_get_u8(&s, &b)){
+        /* no extensions atm so these must be 0 */
+        if(self->rx.rsv1 || self->rx.rsv2 || self->rx.rsv3){
 
-                stream_rewind(&self->rx.s);
+            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
+        }
+        else{
 
-                self->rx.fin = ((b & 0x80U) != 0U);
-                self->rx.rsv1 = ((b & 0x40U) != 0U);
-                self->rx.rsv2 = ((b & 0x20U) != 0U);
-                self->rx.rsv3 = ((b & 0x10U) != 0U);
+            self->rx.opcode = byte_to_opcode(b);
 
-                self->rx.utf8 = 0U;
+            /* filter opcodes */
+            switch(self->rx.opcode){
+            case WIC_OPCODE_CLOSE:
+            case WIC_OPCODE_PING:
+            case WIC_OPCODE_PONG:
 
-                /* no extensions atm so these must be 0 */
-                if(self->rx.rsv1 || self->rx.rsv2 || self->rx.rsv3){
+                /* close, ping, and pong must be final */
+                if(!self->rx.fin){
+                    
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
+                }
+                break;
+
+            case WIC_OPCODE_CONTINUE:
+
+                /* continue must follow a non-final text/binary */
+                if(self->rx.frag == WIC_OPCODE_CONTINUE){
 
                     close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
                 }
                 else{
 
-                    self->rx.opcode = byte_to_opcode(b);
-
-                    /* filter opcodes */
-                    switch(self->rx.opcode){
-                    case WIC_OPCODE_CLOSE:
-                    case WIC_OPCODE_PING:
-                    case WIC_OPCODE_PONG:
-
-                        /* close, ping, and pong must be final */
-                        if(!self->rx.fin){
-                            
-                            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                        }
-                        break;
-
-                    case WIC_OPCODE_CONTINUE:
-
-                        /* continue must follow a non-final text/binary */
-                        if(self->rx.frag == WIC_OPCODE_CONTINUE){
-
-                            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                        }
-                        else{
-
-                            self->rx.utf8 = self->utf8_rx;
-                        }
-                        break;
-
-                    case WIC_OPCODE_TEXT:
-                    case WIC_OPCODE_BINARY:
-
-                        /* interrupting fragmentation */
-                        if(self->rx.frag != WIC_OPCODE_CONTINUE){
-
-                            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                        }
-                        break;
-                        
-                    default:
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                        break;
-                    }
-
-                    self->rx.state = WIC_RX_STATE_SIZE;
+                    self->rx.utf8 = self->utf8_rx;
                 }
-            }
-            break;
+                break;
 
-        case WIC_RX_STATE_SIZE:
+            case WIC_OPCODE_TEXT:
+            case WIC_OPCODE_BINARY:
 
-            if(stream_get_u8(&s, &b)){
+                /* interrupting fragmentation */
+                if(self->rx.frag != WIC_OPCODE_CONTINUE){
 
-                self->rx.masked = ((b & 0x80U) != 0U);
-                self->rx.size = b & 0x7fU;
-
-                switch(self->rx.opcode){
-                case WIC_OPCODE_CLOSE:
-
-                    if((self->rx.size > 125U) || (self->rx.size == 1U)){
-
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                    }
-                    else{
-
-                        if(self->rx.size == 0U){
-
-                            close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE);
-                        }
-                        else if(self->rx.size > stream_max(&self->rx.s)){
-
-                            close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_BUFFER_CLOSE);
-                        }
-                        else{
-
-                            /* nothing */
-                        }                    
-                    }
-                    break;
-                
-                case WIC_OPCODE_PING:
-                case WIC_OPCODE_PONG:
-                
-                    if(self->rx.size > 125U){
-                        
-                        close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
-                    }
-                    else if(self->rx.size > stream_max(&self->rx.s)){
-
-                        close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_BUFFER_CLOSE);
-                    }
-                    else{
-
-                        /* nothing */
-                    }
-                    break;
-
-                default:
-                    break;
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
                 }
-
-                switch(self->rx.size){
-                case 127U:
-                    self->rx.state = WIC_RX_STATE_SIZE_2;
-                    self->rx.size = 0U;
-                    break;
-                case 126U:
-                    self->rx.state = WIC_RX_STATE_SIZE_0;
-                    self->rx.size = 0U;
-                    break;
-                default:
-                    self->rx.state = self->rx.masked ? WIC_RX_STATE_MASK_0 : WIC_RX_STATE_DATA;                        
-                    break;            
-                }                
-            }
-            break;
-
-        case WIC_RX_STATE_SIZE_0:
-        case WIC_RX_STATE_SIZE_1:
-        case WIC_RX_STATE_SIZE_2:
-        case WIC_RX_STATE_SIZE_3:
-        case WIC_RX_STATE_SIZE_4:
-        case WIC_RX_STATE_SIZE_5:
-        case WIC_RX_STATE_SIZE_6:
-        case WIC_RX_STATE_SIZE_7:
-        case WIC_RX_STATE_SIZE_8:
-        case WIC_RX_STATE_SIZE_9:
-        
-            if(stream_get_u8(&s, &b)){
-
-                self->rx.size <<= 8;
-                self->rx.size |= b;
-
-                switch(self->rx.state){
-                default:
-                case WIC_RX_STATE_SIZE_0:
-                    self->rx.state = WIC_RX_STATE_SIZE_1;
-                    break;
-                case WIC_RX_STATE_SIZE_2:
-                    self->rx.state = WIC_RX_STATE_SIZE_3;
-                    break;
-                case WIC_RX_STATE_SIZE_3:
-                    self->rx.state = WIC_RX_STATE_SIZE_4;
-                    break;
-                case WIC_RX_STATE_SIZE_4:
-                    self->rx.state = WIC_RX_STATE_SIZE_5;
-                    break;
-                case WIC_RX_STATE_SIZE_5:
-                    self->rx.state = WIC_RX_STATE_SIZE_6;
-                    break;
-                case WIC_RX_STATE_SIZE_6:
-                    self->rx.state = WIC_RX_STATE_SIZE_7;
-                    break;
-                case WIC_RX_STATE_SIZE_7:
-                    self->rx.state = WIC_RX_STATE_SIZE_8;
-                    break;
-                case WIC_RX_STATE_SIZE_8:
-                    self->rx.state = WIC_RX_STATE_SIZE_9;
-                    break;
-                case WIC_RX_STATE_SIZE_1:
-                case WIC_RX_STATE_SIZE_9:            
-                    self->rx.state = self->rx.masked ? WIC_RX_STATE_MASK_0 : WIC_RX_STATE_DATA;
-                    break;
-                }
-            }
-            break;
-        
-        case WIC_RX_STATE_MASK_0:
-        case WIC_RX_STATE_MASK_1:
-        case WIC_RX_STATE_MASK_2:
-        case WIC_RX_STATE_MASK_3:
-
-            if(stream_get_u8(&s, &b)){
-
-                self->rx.mask[self->rx.state - WIC_RX_STATE_MASK_0] = b;
+                break;
                 
-                switch(self->rx.state){
-                default:
-                case WIC_RX_STATE_MASK_0:
-                    self->rx.state = WIC_RX_STATE_MASK_1;
-                    break;
-                case WIC_RX_STATE_MASK_1:
-                    self->rx.state = WIC_RX_STATE_MASK_2;
-                    break;
-                case WIC_RX_STATE_MASK_2:
-                    self->rx.state = WIC_RX_STATE_MASK_3;
-                    break;
-                case WIC_RX_STATE_MASK_3:
-                    self->rx.state = WIC_RX_STATE_DATA;
-                    break;
+            default:
+                close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
+                break;
+            }
+
+            self->rx.state = WIC_RX_STATE_SIZE;
+        }
+    }
+    else{
+
+        blocked = true;
+    }
+
+    return blocked;
+}
+
+static bool parse_size(struct wic_inst *self, struct wic_stream *s)
+{
+    bool blocked = false;
+    uint8_t b;
+
+    if(stream_get_u8(s, &b)){
+
+        self->rx.masked = ((b & 0x80U) != 0U);
+        self->rx.size = b & 0x7fU;
+
+        switch(self->rx.opcode){
+        case WIC_OPCODE_CLOSE:
+
+            if((self->rx.size > 125U) || (self->rx.size == 1U)){
+
+                close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
+            }
+            else{
+
+                if(self->rx.size == 0U){
+
+                    close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE);
+                }
+                else if(self->rx.size > stream_max(&self->rx.s)){
+
+                    close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_BUFFER_CLOSE);
+                }
+                else{
+
+                    /* nothing */
                 }                    
-            }        
+            }
+            break;
+        
+        case WIC_OPCODE_PING:
+        case WIC_OPCODE_PONG:
+        
+            if(self->rx.size > 125U){
+                
+                close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE);
+            }
+            else if(self->rx.size > stream_max(&self->rx.s)){
+
+                close_with_reason(self, WIC_CLOSE_TOO_BIG, NULL, 0U, WIC_BUFFER_CLOSE);
+            }
+            else{
+
+                /* nothing */
+            }
             break;
 
         default:
             break;
         }
 
-        if(self->rx.state == WIC_RX_STATE_DATA){
+        switch(self->rx.size){
+        case 127U:
+            self->rx.state = WIC_RX_STATE_SIZE_2;
+            self->rx.size = 0U;
+            break;
+        case 126U:
+            self->rx.state = WIC_RX_STATE_SIZE_0;
+            self->rx.size = 0U;
+            break;
+        default:
+            self->rx.state = self->rx.masked ? WIC_RX_STATE_MASK_0 : WIC_RX_STATE_DATA;                        
+            break;            
+        }                
+    }
+    else{
 
-            /* if still receiving data part */
-            if(self->rx.size > 0U){
+        blocked = true;
+    }
 
-                /* fragment to user if larger than our buffer */
-                if(stream_eof(&self->rx.s)){
+    return blocked;
+}
 
-                    switch((self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode){
-                    case WIC_OPCODE_TEXT:
-                        blocked = !self->on_message(self, WIC_ENCODING_UTF8, false, self->rx.s.read, self->rx.s.pos);
-                        break;
-                    case WIC_OPCODE_BINARY:
-                        blocked = !self->on_message(self, WIC_ENCODING_BINARY, false, self->rx.s.read, self->rx.s.pos);
-                        break;                
-                    default:
-                        break;
-                    }
+static bool parse_extended_size(struct wic_inst *self, struct wic_stream *s)
+{
+    uint8_t b;
+    bool blocked = false;
 
-                    if(!blocked){
+    if(stream_get_u8(s, &b)){
 
-                        stream_rewind(&self->rx.s);
-                    }
+        self->rx.size <<= 8;
+        self->rx.size |= b;
+
+        switch(self->rx.state){
+        default:
+        case WIC_RX_STATE_SIZE_0:
+            self->rx.state = WIC_RX_STATE_SIZE_1;
+            break;
+        case WIC_RX_STATE_SIZE_2:
+            self->rx.state = WIC_RX_STATE_SIZE_3;
+            break;
+        case WIC_RX_STATE_SIZE_3:
+            self->rx.state = WIC_RX_STATE_SIZE_4;
+            break;
+        case WIC_RX_STATE_SIZE_4:
+            self->rx.state = WIC_RX_STATE_SIZE_5;
+            break;
+        case WIC_RX_STATE_SIZE_5:
+            self->rx.state = WIC_RX_STATE_SIZE_6;
+            break;
+        case WIC_RX_STATE_SIZE_6:
+            self->rx.state = WIC_RX_STATE_SIZE_7;
+            break;
+        case WIC_RX_STATE_SIZE_7:
+            self->rx.state = WIC_RX_STATE_SIZE_8;
+            break;
+        case WIC_RX_STATE_SIZE_8:
+            self->rx.state = WIC_RX_STATE_SIZE_9;
+            break;
+        case WIC_RX_STATE_SIZE_1:
+        case WIC_RX_STATE_SIZE_9:            
+            self->rx.state = self->rx.masked ? WIC_RX_STATE_MASK_0 : WIC_RX_STATE_DATA;
+            break;
+        }
+    }
+    else{
+
+        blocked = true;
+    }
+
+    return blocked;
+}
+
+static bool parse_mask(struct wic_inst *self, struct wic_stream *s)
+{
+    bool blocked;
+    uint8_t b;
+
+    if(stream_get_u8(s, &b)){
+
+        self->rx.mask[self->rx.state - WIC_RX_STATE_MASK_0] = b;
+        
+        switch(self->rx.state){
+        default:
+        case WIC_RX_STATE_MASK_0:
+            self->rx.state = WIC_RX_STATE_MASK_1;
+            break;
+        case WIC_RX_STATE_MASK_1:
+            self->rx.state = WIC_RX_STATE_MASK_2;
+            break;
+        case WIC_RX_STATE_MASK_2:
+            self->rx.state = WIC_RX_STATE_MASK_3;
+            break;
+        case WIC_RX_STATE_MASK_3:
+            self->rx.state = WIC_RX_STATE_DATA;
+            break;
+        }                    
+    }
+    else{
+
+        blocked = true;
+    }
+
+    return blocked;
+}
+
+static bool parse_data(struct wic_inst *self, struct wic_stream *s)
+{
+    uint16_t code;
+    uint8_t b;
+    bool blocked = false;
+
+    /* if still receiving data part */
+    if(self->rx.size > 0U){
+
+        /* no more space in rx buffer and so pass to the user as a fragment */
+        if(stream_eof(&self->rx.s)){
+
+            switch((self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode){
+            case WIC_OPCODE_TEXT:
+                blocked = !self->on_message(self, WIC_ENCODING_UTF8, false, self->rx.s.read, self->rx.s.pos);
+                break;
+            case WIC_OPCODE_BINARY:
+                blocked = !self->on_message(self, WIC_ENCODING_BINARY, false, self->rx.s.read, self->rx.s.pos);
+                break;                
+            default:
+                break;
+            }
+
+            if(!blocked){
+
+                stream_rewind(&self->rx.s);
+            }
+        }
+        else{
+
+            if(stream_get_u8(s, &b)){
+
+                self->rx.size--;
+
+                if(self->rx.masked){
+
+                    stream_put_u8_masked(&self->rx.s, b, self->rx.mask, &b);
                 }
                 else{
 
-                    if(stream_get_u8(&s, &b)){
-
-                        self->rx.size--;
-
-                        if(self->rx.masked){
-
-                            stream_put_u8_masked(&self->rx.s, b, self->rx.mask, &b);
-                        }
-                        else{
-
-                            stream_put_u8(&self->rx.s, b);
-                        }
-
-                        switch((self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode){
-                        case WIC_OPCODE_TEXT:
-
-                            self->rx.utf8 = utf8_parse(self->rx.utf8, (char)b);
-
-                            if(utf8_is_invalid(self->rx.utf8)){
-
-                                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_BUFFER_CLOSE);
-                            }
-                            break;
-
-                        case WIC_OPCODE_CLOSE:
-
-                            if(stream_pos(&self->rx.s) > 2U){
-
-                                self->rx.utf8 = utf8_parse(self->rx.utf8, (char)b);
-
-                                if(utf8_is_invalid(self->rx.utf8)){
-
-                                    close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
-                                }
-                            }
-                            break;
-                                
-                        default:
-                            break;
-                        }
-                    }
+                    stream_put_u8(&self->rx.s, b);
                 }
-            }
 
-            /* finished reading data part */
-            if((self->state == WIC_STATE_OPEN) && (self->rx.size == 0U)){
-
-                enum wic_opcode opcode = (self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode;
-
-                switch(opcode){
+                switch((self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode){
                 case WIC_OPCODE_TEXT:
 
-                    if(!self->rx.fin){
+                    self->rx.utf8 = utf8_parse(self->rx.utf8, (char)b);
 
-                        if(self->on_message(self, WIC_ENCODING_UTF8, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
-
-                            self->rx.frag = opcode;
-                            self->utf8_rx = self->rx.utf8;
-                        }
-                        else{
-
-                            blocked = true;
-                        }
-                    }
-                    else if(utf8_is_complete(self->rx.utf8)){
-
-                        if(self->on_message(self, WIC_ENCODING_UTF8, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
-                            
-                            self->rx.frag = WIC_OPCODE_CONTINUE;
-                        }
-                        else{
-
-                            blocked = true;
-                        }
-                    }
-                    else{
+                    if(utf8_is_invalid(self->rx.utf8)){
 
                         close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_BUFFER_CLOSE);
                     }
                     break;
 
-                case WIC_OPCODE_BINARY:
-
-                    if(self->on_message(self, WIC_ENCODING_BINARY, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
-
-                        self->rx.frag = self->rx.fin ? WIC_OPCODE_CONTINUE : opcode;
-                    }
-                    else{
-
-                        blocked = true;
-                    }
-                    break;
-                
                 case WIC_OPCODE_CLOSE:
 
-                    code = (uint8_t)self->rx.s.read[0];
-                    code <<= 8;
-                    code |= (uint8_t)self->rx.s.read[1];
+                    if(stream_pos(&self->rx.s) > 2U){
 
-                    switch(code){
-                    case WIC_CLOSE_NORMAL:
-                    case WIC_CLOSE_GOING_AWAY:
-                    case WIC_CLOSE_PROTOCOL_ERROR:
-                    case WIC_CLOSE_UNSUPPORTED:
-                    case WIC_CLOSE_INVALID_DATA:
-                    case WIC_CLOSE_POLICY:
-                    case WIC_CLOSE_TOO_BIG:
-                    case WIC_CLOSE_EXTENSION_REQUIRED:
-                    case WIC_CLOSE_UNEXPECTED_EXCEPTION:
+                        self->rx.utf8 = utf8_parse(self->rx.utf8, (char)b);
 
-                        if(utf8_is_complete(self->rx.utf8)){
+                        if(utf8_is_invalid(self->rx.utf8)){
 
-                            close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code), WIC_BUFFER_CLOSE_RESPONSE);
+                            close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
                         }
-                        else{
-
-                            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
-                        }
-                        break;
-
-                    default:
-
-                        if((code >= 3000U) && (code <= 3999)){
-
-                            close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
-                        }
-                        else if((code >= 4000U) && (code <= 4999)){
-
-                            close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
-                        }
-                        else{
-                            
-                            close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
-                        }
-                        break;
                     }
+                    break;
                         
-                    break;
-
-                case WIC_OPCODE_PING:
-
-                    send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos);
-
-                    if(self->on_ping != NULL){
-
-                        self->on_ping(self);
-                    }                
-                    break;
-                
-                case WIC_OPCODE_PONG:
-
-                    if(self->on_pong != NULL){
-
-                        self->on_pong(self);
-                    }
-                    break;
-                
                 default:
                     break;
                 }
+            }
+            else{
 
-                if(!blocked){
-                    
-                    self->rx.state = WIC_RX_STATE_OPCODE;
-                }                
+                blocked = true;
             }
         }
     }
-    while(!stream_eof(&s) && (self->state == WIC_STATE_OPEN) && !blocked);
 
-    return stream_pos(&s);
+    /* finished reading data part */
+    if((self->state == WIC_STATE_OPEN) && (self->rx.size == 0U)){
+
+        enum wic_opcode opcode = (self->rx.opcode == WIC_OPCODE_CONTINUE) ? self->rx.frag : self->rx.opcode;
+
+        switch(opcode){
+        case WIC_OPCODE_TEXT:
+
+            if(!self->rx.fin){
+
+                if(self->on_message(self, WIC_ENCODING_UTF8, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
+
+                    self->rx.frag = opcode;
+                    self->utf8_rx = self->rx.utf8;
+                }
+                else{
+
+                    blocked = true;
+                }
+            }
+            else if(utf8_is_complete(self->rx.utf8)){
+
+                if(self->on_message(self, WIC_ENCODING_UTF8, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
+                    
+                    self->rx.frag = WIC_OPCODE_CONTINUE;
+                }
+                else{
+
+                    blocked = true;
+                }
+            }
+            else{
+
+                close_with_reason(self, WIC_CLOSE_INVALID_DATA, NULL, 0U, WIC_BUFFER_CLOSE);
+            }
+            break;
+
+        case WIC_OPCODE_BINARY:
+
+            if(self->on_message(self, WIC_ENCODING_BINARY, self->rx.fin, self->rx.s.read, self->rx.s.pos)){
+
+                self->rx.frag = self->rx.fin ? WIC_OPCODE_CONTINUE : opcode;
+            }
+            else{
+
+                blocked = true;
+            }
+            break;
+        
+        case WIC_OPCODE_CLOSE:
+
+            code = (uint8_t)self->rx.s.read[0];
+            code <<= 8;
+            code |= (uint8_t)self->rx.s.read[1];
+
+            switch(code){
+            case WIC_CLOSE_NORMAL:
+            case WIC_CLOSE_GOING_AWAY:
+            case WIC_CLOSE_PROTOCOL_ERROR:
+            case WIC_CLOSE_UNSUPPORTED:
+            case WIC_CLOSE_INVALID_DATA:
+            case WIC_CLOSE_POLICY:
+            case WIC_CLOSE_TOO_BIG:
+            case WIC_CLOSE_EXTENSION_REQUIRED:
+            case WIC_CLOSE_UNEXPECTED_EXCEPTION:
+
+                if(utf8_is_complete(self->rx.utf8)){
+
+                    close_with_reason(self, code, &self->rx.s.read[sizeof(code)], self->rx.s.pos - sizeof(code), WIC_BUFFER_CLOSE_RESPONSE);
+                }
+                else{
+
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
+                }
+                break;
+
+            default:
+
+                if((code >= 3000U) && (code <= 3999)){
+
+                    close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
+                }
+                else if((code >= 4000U) && (code <= 4999)){
+
+                    close_with_reason(self, WIC_CLOSE_NORMAL, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
+                }
+                else{
+                    
+                    close_with_reason(self, WIC_CLOSE_PROTOCOL_ERROR, NULL, 0U, WIC_BUFFER_CLOSE_RESPONSE);
+                }
+                break;
+            }
+                
+            break;
+
+        case WIC_OPCODE_PING:
+
+            send_pong_with_payload(self, self->rx.s.read, self->rx.s.pos);
+
+            if(self->on_ping != NULL){
+
+                self->on_ping(self);
+            }                
+            break;
+        
+        case WIC_OPCODE_PONG:
+
+            if(self->on_pong != NULL){
+
+                self->on_pong(self);
+            }
+            break;
+        
+        default:
+            break;
+        }
+
+        if(!blocked){
+            
+            self->rx.state = WIC_RX_STATE_OPCODE;
+        }                
+    }
+
+    return blocked;        
 }
 
 static enum wic_status start_server(struct wic_inst *self)
@@ -1618,6 +1674,19 @@ static size_t stream_max(const struct wic_stream *self)
 static size_t stream_pos(const struct wic_stream *self)
 {
     return self->pos;
+}
+
+static bool stream_seek(struct wic_stream *self, size_t offset)
+{
+    bool retval = false;
+
+    if(self->size >= offset){
+
+        self->pos = offset;        
+        retval = true;
+    }
+
+    return retval;
 }
 
 static bool stream_eof(const struct wic_stream *self)

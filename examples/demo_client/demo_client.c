@@ -28,12 +28,12 @@
 #include <signal.h>
 
 static void on_open_handler(struct wic_inst *inst);
-static void on_text_handler(struct wic_inst *inst, bool fin, const char *data, uint16_t size);
+static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 static void on_close_handler(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size);
 static void on_close_transport_handler(struct wic_inst *inst);
-static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type);
+static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type);
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason);
-static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size);
+static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size);
 
 int main(int argc, char **argv)
 {
@@ -51,7 +51,7 @@ int main(int argc, char **argv)
     arg.rx = rx; arg.rx_max = sizeof(rx);    
     arg.on_send = on_send_handler;
     arg.on_buffer = on_buffer_handler;
-    arg.on_text = on_text_handler;        
+    arg.on_message = on_message_handler;        
     arg.on_open = on_open_handler;        
     arg.on_close = on_close_handler;        
     arg.on_close_transport = on_close_transport_handler;        
@@ -107,9 +107,14 @@ int main(int argc, char **argv)
     exit(EXIT_SUCCESS);
 }
 
-static void on_text_handler(struct wic_inst *inst, bool fin, const char *data, uint16_t size)
+static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
-    printf("received text: %.*s\n", size, data);
+    if(encoding == WIC_ENCODING_UTF8){
+
+        printf("received text: %.*s\n", size, data);
+    }
+
+    return true;
 }
 
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason)
@@ -148,7 +153,7 @@ static void on_close_transport_handler(struct wic_inst *inst)
     transport_close((int *)wic_get_app(inst));
 }
 
-static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_frame_type type)
+static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
     if(!transport_write(*(int *)wic_get_app(inst), data, size)){
 
@@ -156,7 +161,7 @@ static void on_send_handler(struct wic_inst *inst, const void *data, size_t size
     }
 }
 
-static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_frame_type type, size_t *max_size)
+static void *on_buffer_handler(struct wic_inst *inst, size_t min_size, enum wic_buffer type, size_t *max_size)
 {
     static uint8_t tx[1000U];
 
