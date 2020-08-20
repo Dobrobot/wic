@@ -40,8 +40,6 @@ bool transport_open_client(enum wic_schema schema, const char *host, uint16_t po
     const char *service = NULL;
     int tmp;
 
-    printf("%s\n", host);
-
     (void)memset(pbuf, 0, sizeof(pbuf));
 
     switch(schema){
@@ -95,7 +93,6 @@ bool transport_open_client(enum wic_schema schema, const char *host, uint16_t po
             }
             else{
 
-                LOG("connected!");
                 retval = true;
             }
         }

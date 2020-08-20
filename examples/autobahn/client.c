@@ -28,6 +28,8 @@
 #include <signal.h>
 #include <time.h>
 
+bool log_enabled = false;
+
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size);
 
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason);
@@ -102,7 +104,7 @@ int main(int argc, char **argv)
 
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason)
 {
-    printf("websocket handshake failed for reason %d\n", reason);
+    LOG("websocket handshake failed for reason %d", reason);
 }
 
 static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *arg)
@@ -134,12 +136,12 @@ static void do_client(int *s, struct wic_inst *inst, const struct wic_init_arg *
 
 static void on_close(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size)
 {
-    printf("websocket closed for reason %u %.*s\n", code, size, reason);
+    LOG("websocket closed for reason %u %.*s", code, size, reason);
 }
 
 static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
-    printf("received %u bytes of %s %s\n", size, (encoding == WIC_ENCODING_UTF8) ? "text" : "binary", fin ? "(final)" : "");
+    LOG("received %u bytes of %s %s", size, (encoding == WIC_ENCODING_UTF8) ? "text" : "binary", fin ? "(final)" : "");
 
     wic_send(inst, encoding, fin, data, size);
 
@@ -148,7 +150,7 @@ static bool on_message(struct wic_inst *inst, enum wic_encoding encoding, bool f
 
 static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
 {
-    printf("%.*s\n", size, data);
+    LOG("%.*s", size, data);
 
     if(size > 0){
 
@@ -162,12 +164,12 @@ static bool on_message_case_count(struct wic_inst *inst, enum wic_encoding encod
 
 static void on_open(struct wic_inst *inst)
 {
-    printf("websocket is open\n");
+    LOG("websocket is open");
 }
 
 static void on_send(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
-    printf("sending buffer type %d\n", type);
+    LOG("sending buffer type %d", type);
 
     transport_write(*(int *)wic_get_app(inst), data, size);
 }

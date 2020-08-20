@@ -27,6 +27,8 @@
 #include <string.h>
 #include <signal.h>
 
+bool log_enabled = true;
+
 static void on_open_handler(struct wic_inst *inst);
 static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size);
 static void on_close_handler(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size);
