@@ -113,7 +113,7 @@ static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding
 {
     if(encoding == WIC_ENCODING_UTF8){
 
-        printf("received text: %.*s\n", size, data);
+        LOG("received text: %.*s", size, data);
     }
 
     return true;
@@ -121,20 +121,20 @@ static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding
 
 static void on_handshake_failure_handler(struct wic_inst *inst, enum wic_handshake_failure reason)
 {
-    printf("websocket handshake failed for reason %d\n", reason);
+    LOG("websocket handshake failed for reason %d", reason);
 }
 
 static void on_open_handler(struct wic_inst *inst)
 {
     const char *name, *value;
 
-    printf("websocket is open\n");
+    LOG("websocket is open");
     
-    printf("received handshake:\n");
+    LOG("received handshake:");
 
     for(value = wic_get_next_header(inst, &name); value; value = wic_get_next_header(inst, &name)){
 
-        printf("%s: %s\n", name, value);
+        LOG("%s: %s", name, value);
     }
 
     const char msg[] = "hello world";
@@ -147,7 +147,7 @@ static void on_open_handler(struct wic_inst *inst)
 
 static void on_close_handler(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size)
 {
-    printf("websocket closed for reason %u\n", code);
+    LOG("websocket closed for reason %u", code);
 }
 
 static void on_close_transport_handler(struct wic_inst *inst)
@@ -157,7 +157,7 @@ static void on_close_transport_handler(struct wic_inst *inst)
 
 static void on_send_handler(struct wic_inst *inst, const void *data, size_t size, enum wic_buffer type)
 {
-    printf("sending buffer type %d\n", type);
+    LOG("sending buffer type %d", type);
 
     transport_write(*(int *)wic_get_app(inst), data, size);
 }
