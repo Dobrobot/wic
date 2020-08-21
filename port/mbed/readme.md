@@ -1,7 +1,7 @@
 MBED WIC Wrapper
 ================
 
-This wrapper makes it easy to use WIC on MBED.
+This isn't working properly yet.
 
 ## WIC::Client
 
