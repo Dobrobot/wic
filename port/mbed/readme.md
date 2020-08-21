@@ -30,7 +30,7 @@ int main()
 
     eth.connect();
 
-    client.open("wss://echo.websocket.org/");
+    client.connect("ws://echo.websocket.org/");
 
     client.send("hello world!");
 

@@ -401,6 +401,7 @@ ClientBase::worker_task()
 
                 rx_pool.free(_rx);                
                 _rx = nullptr;
+                do_work();
             }
         }
 
@@ -414,8 +415,13 @@ ClientBase::worker_task()
 
             if(close){
 
-                while(tx_queue.get(close));                
-                do_close_socket();                
+                for(_tx = tx_queue.get(close); _tx; _tx = tx_queue.get(close)){
+
+                    tx_queue.free(_tx);
+                }
+
+                do_close_socket();
+                do_work();
             }            
         }
 
@@ -433,6 +439,7 @@ ClientBase::worker_task()
                     tx_queue.free(_tx);
                     _tx = nullptr;
                     notify_writers();
+                    do_work();
                 }
             }
             else{
@@ -442,11 +449,10 @@ ClientBase::worker_task()
                     break;
                 default:
 
-                    //wic_close_with_reason(&inst, WIC_CLOSE_ABNORMAL_2, NULL, 0U);
-                    //do_work();
                     tx_queue.free(_tx);
                     _tx = nullptr;
                     notify_writers();
+                    do_work();
                     break;
                 }                    
             }

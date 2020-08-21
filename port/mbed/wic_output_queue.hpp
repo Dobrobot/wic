@@ -45,9 +45,9 @@ namespace WIC {
         protected:
 
             Buffer<MAX_SIZE> user;
-            Buffer<127> close;
+            Buffer<131> close;
             Buffer<2> ping;
-            Buffer<127> pong;
+            Buffer<131> pong;
 
             EventFlags flags;
 
