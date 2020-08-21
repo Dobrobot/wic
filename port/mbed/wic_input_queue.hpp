@@ -49,7 +49,14 @@ namespace WIC {
 
             BufferBase *alloc()
             {
-                return static_cast<BufferBase *>(new(mail.alloc()) Buffer<SIZE>);                 
+                Buffer<SIZE> *ptr = mail.alloc();
+
+                if(ptr){
+
+                    ptr = new(ptr)Buffer<SIZE>;
+                }
+
+                return static_cast<BufferBase *>(ptr);
             }
 
             void free(BufferBase *buf)
