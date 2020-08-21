@@ -11,9 +11,8 @@ to do the integration work.
 WIC is a work in progress. This means that:
 
 - server role is not supported yet
-- handshake implementation is not robust and is only exercised on the
-  happy path
-- interfaces are not stable
+- handshake implementation is not very robust
+- interfaces may change
 
 ## Features
 
