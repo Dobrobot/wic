@@ -116,6 +116,8 @@ static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding
         LOG("received text: %.*s", size, data);
     }
 
+    wic_close(inst);
+
     return true;
 }
 
@@ -140,9 +142,6 @@ static void on_open_handler(struct wic_inst *inst)
     const char msg[] = "hello world";
 
     wic_send_text(inst, true, msg, strlen(msg));
-
-    /* we are done */
-    wic_close(inst);
 } 
 
 static void on_close_handler(struct wic_inst *inst, uint16_t code, const char *reason, uint16_t size)

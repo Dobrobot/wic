@@ -76,6 +76,7 @@ int main(int argc, char **argv)
 
     arg.on_send = on_send_handler;    
     arg.on_open = on_open_handler;        
+    arg.on_message = on_message_handler;        
     arg.on_close_transport = on_close_transport_handler;        
     arg.on_buffer = on_buffer_handler;        
 
@@ -108,9 +109,7 @@ static void on_open_handler(struct wic_inst *inst)
 {
     const char msg[] = "hello world";
 
-    wic_send_text(inst, true, msg, strlen(msg));
-    
-    wic_close(inst);
+    wic_send_text(inst, true, msg, strlen(msg));    
 } 
 
 static void on_close_transport_handler(struct wic_inst *inst)
@@ -132,6 +131,18 @@ static void *on_buffer_handler(struct wic_inst *inst, size_t min_size,
     *max_size = sizeof(tx);
 
     return (min_size <= sizeof(tx)) ? tx : NULL;
+}
+
+static bool on_message_handler(struct wic_inst *inst, enum wic_encoding encoding, bool fin, const char *data, uint16_t size)
+{
+    if(encoding == WIC_ENCODING_UTF8){
+
+        printf("received text: %.*s\n", size, data);
+    }
+
+    wic_close(inst);
+
+    return true;
 }
 ~~~
 
