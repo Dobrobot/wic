@@ -1,6 +1,10 @@
 History
 =======
 
+## 0.2.1
+
+- default port is now set when no port is included in the URL
+
 ## 0.2.0
 
 Many enhancements to the original concept, the most significant being improved
