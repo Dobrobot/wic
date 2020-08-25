@@ -1,10 +1,6 @@
 #include "wic_client.hpp"
 
-#include <assert.h>
-
 using namespace WIC;
-
-uint32_t time_since();
 
 /* constructors *******************************************************/
 
