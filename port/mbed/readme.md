@@ -1,8 +1,10 @@
 MBED WIC Wrapper
 ================
 
-This is a work in progress. It mostly works but the interfaces need
-improvement.
+This is a work in progress.
+
+- TLS doesn't seem to connect
+- interfaces need some work, especially around correct nsapi_error_t codes
 
 ## WIC::Client
 
@@ -16,7 +18,7 @@ A wrapper for client mode.
 An example:
 
 ~~~ c++
-#include "wic_client.hpp"
+#include "wic_client.h"
 #include "EthernetInterface.h"
 
 int main()

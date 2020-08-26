@@ -19,12 +19,12 @@
  *
  * */
 
-#ifndef WIC_OUTPUT_QUEUE_HPP
-#define WIC_OUTPUT_QUEUE_HPP
+#ifndef WIC_OUTPUT_QUEUE_H
+#define WIC_OUTPUT_QUEUE_H
 
 #include "mbed.h"
 #include "wic.h"
-#include "wic_buffer.hpp"
+#include "wic_buffer.h"
 
 namespace WIC {
 

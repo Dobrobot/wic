@@ -19,15 +19,15 @@
  *
  * */
 
-#ifndef WIC_CLIENT_HPP
-#define WIC_CLIENT_HPP
+#ifndef WIC_CLIENT_H
+#define WIC_CLIENT_H
 
 #include "mbed.h"
 #include "wic.h"
 #include "TLSSocket.h"
-#include "wic_output_queue.hpp"
-#include "wic_buffer.hpp"
-#include "wic_input_queue.hpp"
+#include "wic_output_queue.h"
+#include "wic_buffer.h"
+#include "wic_input_queue.h"
 
 namespace WIC {
 

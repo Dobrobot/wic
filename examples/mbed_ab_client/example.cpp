@@ -19,8 +19,8 @@
  *
  * */
 
-#include "wic_client.hpp"
-#include "wic_nsapi.hpp"
+#include "wic_client.h"
+#include "wic_nsapi.h"
 #include "EthernetInterface.h"
 #include <cinttypes>
 

@@ -1,4 +1,4 @@
-#include "wic_client.hpp"
+#include "wic_client.h"
 
 using namespace WIC;
 

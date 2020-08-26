@@ -19,7 +19,7 @@
  *
  * */
 
-#include "wic_client.hpp"
+#include "wic_client.h"
 #include "EthernetInterface.h"
 
 int main()

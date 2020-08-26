@@ -19,11 +19,11 @@
  *
  * */
 
-#ifndef WIC_USER_QUEUE_HPP
-#define WIC_USER_QUEUE_HPP
+#ifndef WIC_USER_QUEUE_H
+#define WIC_USER_QUEUE_H
 
 #include "mbed.h"
-#include "wic_buffer.hpp"
+#include "wic_buffer.h"
 
 namespace WIC {
 

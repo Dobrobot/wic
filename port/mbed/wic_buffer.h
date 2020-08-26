@@ -19,8 +19,8 @@
  *
  * */
 
-#ifndef WIC_BUFFER_HPP
-#define WIC_BUFFER_HPP
+#ifndef WIC_BUFFER_H
+#define WIC_BUFFER_H
 
 #include "mbed.h"
 #include "wic.h"
