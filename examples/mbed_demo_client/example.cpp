@@ -30,7 +30,7 @@ int main()
     nsapi_size_or_error_t bytes;
 
     static EthernetInterface eth;
-    static WIC::Client<sizeof(buffer), 1012> client(eth);
+    static WIC::Client<sizeof(buffer)> client(eth);
 
     eth.connect();
 
